@@ -113,6 +113,33 @@ export interface OrderMarker {
   t: number;
 }
 
+/** a delayed explosion — secondary blasts of a collapsing structure */
+interface PendingBlast {
+  x: number;
+  y: number;
+  at: number;
+  scale: number;
+  crater: number;
+  smoke: number;
+  debris: number;
+  stains: number;
+  ring: boolean;
+  shake: number;
+  sound: 'shell' | 'arty' | 'missile' | 'kill' | 'small';
+}
+
+/** collapsed structure remains */
+export interface RubbleField {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rot: number;
+  seed: number;
+  born: number;
+  smokeUntil: number;
+}
+
 export class EffectsSystem {
   rng: RNG;
   camera: Camera;
@@ -132,6 +159,10 @@ export class EffectsSystem {
   wrecks: Wreck[] = [];
   /** crisp vector craters (also baked into the scars bitmap) */
   craters: { x: number; y: number; r: number; seed: number }[] = [];
+  /** delayed secondary explosions */
+  pending: PendingBlast[] = [];
+  /** collapsed structures */
+  rubble: RubbleField[] = [];
 
   smokeSprites: HTMLCanvasElement[] = [];
   dustSprite: HTMLCanvasElement | null = null;
@@ -323,6 +354,36 @@ export class EffectsSystem {
     if (this.wrecks.length > 46) this.wrecks.shift();
   }
 
+  addRubble(r: RubbleField) {
+    this.rubble.push(r);
+  }
+
+  /** schedule a train of secondary explosions — structural collapse */
+  scheduleBlasts(
+    x: number,
+    y: number,
+    opts: { count: number; duration: number; spread: number; scaleMin: number; scaleMax: number; delay?: number }
+  ) {
+    const delay = opts.delay ?? 0;
+    for (let i = 0; i < opts.count; i++) {
+      const a = this.rng.range(0, Math.PI * 2);
+      const d = this.rng.range(0, opts.spread);
+      this.pending.push({
+        x: x + Math.cos(a) * d,
+        y: y + Math.sin(a) * d,
+        at: this.time + delay + (opts.duration * (i + this.rng.range(0, 0.6))) / opts.count,
+        scale: this.rng.range(opts.scaleMin, opts.scaleMax),
+        crater: this.rng.range(4, 9),
+        smoke: 7,
+        debris: 9,
+        stains: 22,
+        ring: true,
+        shake: 3,
+        sound: 'arty',
+      });
+    }
+  }
+
   // ── scar stamping (permanent battlefield memory) ───────────
 
   stampCrater(x: number, y: number, r: number) {
@@ -423,6 +484,26 @@ export class EffectsSystem {
   update(dt: number) {
     this.time += dt;
     this.windAngle = -0.6 + Math.sin(this.time * 0.013) * 0.45;
+
+    // scheduled secondary blasts
+    for (let i = this.pending.length - 1; i >= 0; i--) {
+      const b = this.pending[i];
+      if (this.time >= b.at) {
+        this.spawnExplosion(b.x, b.y, {
+          dir: this.rng.range(0, Math.PI * 2),
+          dirStrength: 0.4,
+          scale: b.scale,
+          crater: b.crater,
+          smoke: b.smoke,
+          debris: b.debris,
+          stains: b.stains,
+          ring: b.ring,
+          sound: b.sound,
+          shake: b.shake,
+        });
+        this.pending.splice(i, 1);
+      }
+    }
 
     // explosions
     for (let i = this.explosions.length - 1; i >= 0; i--) {
@@ -529,6 +610,26 @@ export class EffectsSystem {
             vy: -3,
           });
           void life;
+        }
+      }
+    }
+
+    // rubble smoke — long oily columns off a destroyed structure
+    for (const r of this.rubble) {
+      if (this.time < r.smokeUntil && this.smokes.length < 380) {
+        if (this.rng.chance(dt * 1.6)) {
+          this.spawnSmoke(
+            r.x + this.rng.range(-r.w * 0.3, r.w * 0.3),
+            r.y + this.rng.range(-r.h * 0.3, r.h * 0.3),
+            {
+              r: 3,
+              r1: 20 + this.rng.range(0, 18),
+              life: 4 + this.rng.range(0, 4),
+              alpha: 0.3,
+              vy: -5,
+              dark: 1.3,
+            }
+          );
         }
       }
     }
@@ -777,6 +878,69 @@ export class EffectsSystem {
           ctx.beginPath();
           ctx.arc(m.x, m.y, 2, 0, Math.PI * 2);
           ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  /** collapsed structures — slabs, spill, burnt voids */
+  drawRubble(ctx: CanvasRenderingContext2D, cam: Camera) {
+    const pad = 140;
+    for (const r of this.rubble) {
+      if (r.x + r.w < cam.viewX - pad || r.x - r.w > cam.viewX + cam.viewW + pad) continue;
+      if (r.y + r.h < cam.viewY - pad || r.y - r.h > cam.viewY + cam.viewH + pad) continue;
+      const age = this.time - r.born;
+      const alpha = clamp(1 - age / 1400, 0.6, 1);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(r.x, r.y);
+      ctx.rotate(r.rot);
+      // scorched footprint
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(r.w, r.h) * 0.8);
+      g.addColorStop(0, 'rgba(16,13,8,0.55)');
+      g.addColorStop(1, 'rgba(16,13,8,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r.w * 0.85, r.h * 0.85, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // collapsed wall lines — jagged partial outlines
+      ctx.strokeStyle = 'rgba(30,26,20,0.8)';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      const n = 26;
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const rr =
+          i % 3 === 0
+            ? 0
+            : Math.max(r.w, r.h) * 0.5 * (0.5 + 0.5 * Math.abs(Math.sin(i * 3.7 + r.seed * 20)));
+        const px = Math.cos(a) * rr * (r.w / Math.max(r.w, r.h));
+        const py = Math.sin(a) * rr * (r.h / Math.max(r.w, r.h));
+        if (i === 0 || i % 3 === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      // fallen slabs
+      ctx.fillStyle = 'rgba(38,34,27,0.85)';
+      for (let i = 0; i < 9; i++) {
+        const a = r.seed * 9 + i * 2.4;
+        const d = (0.15 + 0.35 * Math.abs(Math.sin(i * 5.1 + r.seed * 30))) * Math.max(r.w, r.h);
+        ctx.save();
+        ctx.translate(Math.cos(a) * d, Math.sin(a) * d);
+        ctx.rotate(a + r.seed);
+        ctx.fillRect(-r.w * 0.14, -r.h * 0.1, r.w * 0.28, r.h * 0.2);
+        ctx.restore();
+      }
+      // debris speckle
+      if (cam.zoom > 0.7) {
+        ctx.fillStyle = 'rgba(24,20,15,0.6)';
+        for (let i = 0; i < 26; i++) {
+          const a = (i * 2.399 + r.seed * 40) % (Math.PI * 2);
+          const d = (0.2 + ((i * 37 + r.seed * 100) % 70) / 100) * Math.max(r.w, r.h) * 0.62;
+          ctx.beginPath();
+          ctx.arc(Math.cos(a) * d, Math.sin(a) * d, 0.9 + ((i * 13) % 10) / 12, 0, Math.PI * 2);
+          ctx.fill();
         }
       }
       ctx.restore();

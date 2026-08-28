@@ -1,6 +1,7 @@
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · game orchestrator
-// Fixed-step simulation, scenario lifecycle, HUD snapshots.
+// Fixed-step simulation, scenario lifecycle, ink economy,
+// HUD snapshots.
 // ─────────────────────────────────────────────────────────────
 
 import { Camera } from './systems/camera';
@@ -14,6 +15,7 @@ import { EnemyCommander } from './systems/ai';
 import { InputSystem } from './systems/input';
 import { Renderer } from './render/renderer';
 import { buildScenario, ScenarioData, BRIEFING } from './world/scenario';
+import { InkEconomy, FRIEND_BATTALIONS } from './systems/economy';
 import type { Unit, SimContext } from './entities/units';
 import type { HudSnapshot, HudUnitLine, LogEntry, AfterActionReport } from './core/types';
 import { RNG, clockString, clamp } from './core/math';
@@ -34,6 +36,7 @@ export class Game {
   ai!: EnemyCommander;
   input: InputSystem;
   renderer: Renderer;
+  economy!: InkEconomy;
 
   units: Unit[] = [];
   objectives: ScenarioData['objectives'] = [];
@@ -85,6 +88,7 @@ export class Game {
       effects: this.effects,
       projectiles: this.projectiles,
       audio: this.audio,
+      economy: this.economy,
       time: this.time,
       rng: new RNG(this.seed ^ 0xbeef),
       log: (text, level) => this.log(text, level),
@@ -97,11 +101,17 @@ export class Game {
   }
 
   private loadScenario() {
-    const data = buildScenario(this.seed);
+    const data = buildScenario(this.seed, this.terrain);
     this.units = data.units;
     this.objectives = data.objectives;
     this.anchors = data.anchors;
+    this.economy = new InkEconomy(data.sectors, data.startInk);
+    this.economy.friendlyEntry = { x: 240, y: 2960 };
+    this.economy.friendlyAssembly = { x: 640, y: 2520 };
+    this.economy.enemyEntry = { x: 3440, y: 60 };
+    this.economy.enemyRally = { x: 3480, y: 560 };
     this.ai = new EnemyCommander(this.anchors);
+    this.ai.init(this.simCtxSafe());
     this.time = 0;
     this.result = null;
     this.stats = { enemyDestroyed: 0, friendLost: 0, roundsFired: 0 };
@@ -114,9 +124,25 @@ export class Game {
     this.vision = new VisionSystem(this.seed);
   }
 
+  private simCtxSafe(): SimContext {
+    // pre-economy context for AI init
+    return {
+      units: this.units,
+      terrain: this.terrain,
+      effects: this.effects,
+      projectiles: this.projectiles,
+      audio: this.audio,
+      economy: this.economy,
+      time: 0,
+      rng: new RNG(this.seed ^ 0xbeef),
+      log: (text: string, level?: 'info' | 'contact' | 'alert' | 'objective' | 'economy') => this.log(text, level),
+    };
+  }
+
   simCtx(): SimContext {
     this.simCtxCache.time = this.time;
     this.simCtxCache.units = this.units;
+    this.simCtxCache.economy = this.economy;
     return this.simCtxCache;
   }
 
@@ -126,7 +152,8 @@ export class Game {
     this.running = true;
     this.audio.ensureStarted();
     this.log(`OPERATION CROSSWIND — TASK FORCE SABRE DEPLOYED`, 'objective');
-    this.log(`SCOUT SECTIONS FORWARD · ENEMY HOLDS THE RIVER LINE`, 'info');
+    this.log(`BASE INK 260 · SECTORS AND WORKS PAY — READ THE DEPLOY PANEL`, 'economy');
+    this.log(`ZAVOD 3 LIES ABANDONED SOUTH OF THE RIVER — OCCUPY IT`, 'info');
   }
 
   restart(newSeed?: number) {
@@ -145,6 +172,7 @@ export class Game {
       effects: this.effects,
       projectiles: this.projectiles,
       audio: this.audio,
+      economy: this.economy,
       time: 0,
       rng: new RNG(this.seed ^ 0xbeef),
       log: (text, level) => this.log(text, level),
@@ -190,6 +218,28 @@ export class Game {
     this.camera.setViewport(rect.width, rect.height);
   }
 
+  /** player queues a battalion from the HUD */
+  queueBattalion(battalionId: string): boolean {
+    if (this.result) return false;
+    const def = FRIEND_BATTALIONS.find((b) => b.id === battalionId);
+    if (!def) return false;
+    if (this.economy.ink.FRIEND < def.cost) {
+      this.log(`INSUFFICIENT INK — ${def.name} REQUIRES ${def.cost}`, 'alert');
+      this.audio.uiTick();
+      return false;
+    }
+    if (!this.economy.canQueue('FRIEND')) {
+      this.log(`PRODUCTION QUEUE FULL`, 'alert');
+      return false;
+    }
+    const ok = this.economy.purchase('FRIEND', battalionId);
+    if (ok) {
+      this.log(`${def.name} ORDERED — ${Math.round(def.buildTime)}s TO MUSTER`, 'economy');
+      this.audio.uiTick();
+    }
+    return !!ok;
+  }
+
   // ── main loop ──────────────────────────────────────────────
 
   private loop(now: number) {
@@ -211,10 +261,6 @@ export class Game {
       // let the last effects settle
       this.effects.update(dt);
       this.projectiles.update(dt, this.simCtx());
-      this.time += 0; // freeze clock
-      if (this.time - this.resultAt > 0 && !this.resultLogged) {
-        this.resultLogged = true;
-      }
     }
 
     this.renderer.draw(this.ctx, this, this.dpr);
@@ -236,6 +282,7 @@ export class Game {
 
     this.vision.update(dt, ctx);
     this.ai.update(dt, ctx);
+    this.economy.update(dt, ctx);
 
     for (const u of this.units) {
       u.update(dt, ctx);
@@ -248,14 +295,20 @@ export class Game {
     for (const u of this.units) {
       if (u.dead && !this.processedDead.has(u.id)) {
         this.processedDead.add(u.id);
+        if (u.def.kind === 'FACTORY') {
+          // a destroyed works is its own event — not a kill tally
+          continue;
+        }
         if (u.faction === 'ENEMY') {
           this.stats.enemyDestroyed++;
           this.killsByType.set(u.def.name, (this.killsByType.get(u.def.name) ?? 0) + 1);
           this.log(`ENEMY DESTROYED — ${u.def.name} · GRID ${u.positionGrid()}`, 'info');
+          this.economy.onUnitDestroyed(u, ctx);
         } else {
           this.stats.friendLost++;
           this.lossesByType.set(u.def.name, (this.lossesByType.get(u.def.name) ?? 0) + 1);
           this.log(`${u.callsign} LOST — ${u.def.name}`, 'alert');
+          this.economy.onUnitDestroyed(u, ctx);
         }
       }
     }
@@ -289,6 +342,33 @@ export class Game {
       });
     }
 
+    // living works breathe — chimney steam; damaged ones smoke
+    for (const u of this.units) {
+      if (u.dead || u.def.kind !== 'FACTORY') continue;
+      if (u.hp < u.def.hp * 0.6) {
+        if (Math.random() < dt * 3) {
+          this.effects.spawnSmoke(u.x + (Math.random() - 0.5) * 26, u.y + (Math.random() - 0.5) * 16, {
+            r: 3,
+            r1: 18,
+            life: 4,
+            alpha: 0.34,
+            vy: -5,
+            dark: 1.25,
+          });
+        }
+      } else if (Math.random() < dt * 0.9) {
+        // faint working-works steam off the chimney
+        this.effects.spawnSmoke(u.x + 26, u.y - 18, {
+          r: 2,
+          r1: 12,
+          life: 5,
+          alpha: 0.1,
+          vy: -3.5,
+          dark: 0.5,
+        });
+      }
+    }
+
     this.audio.updateListener(this.camera.x, this.camera.y, this.camera.viewW / this.camera.zoom);
 
     this.checkObjectives();
@@ -305,7 +385,7 @@ export class Game {
         }
       } else {
         const hold = this.units.some(
-          (u) => u.faction === 'ENEMY' && !u.dead && u.def.kind !== 'HQ' && Math.hypot(u.x - obj.pos.x, u.y - obj.pos.y) < 680
+          (u) => u.faction === 'ENEMY' && !u.dead && u.def.kind !== 'HQ' && u.def.kind !== 'FACTORY' && Math.hypot(u.x - obj.pos.x, u.y - obj.pos.y) < 680
         );
         if (!hold) {
           obj.secured = true;
@@ -313,10 +393,11 @@ export class Game {
         }
       }
     }
-    // defeat: every friendly unit destroyed
+    // defeat: the force is annihilated with nothing inbound
     if (!this.result) {
-      const alive = this.units.some((u) => u.faction === 'FRIEND' && !u.dead);
-      if (!alive) this.endMission('DEFEAT');
+      const alive = this.units.some((u) => u.faction === 'FRIEND' && !u.dead && u.def.kind !== 'FACTORY');
+      const inbound = this.economy.productions.some((p) => p.faction === 'FRIEND');
+      if (!alive && !inbound) this.endMission('DEFEAT');
     }
   }
 
@@ -327,6 +408,8 @@ export class Game {
   }
 
   buildAAR(): AfterActionReport {
+    const factoriesTotal = this.units.filter((u) => u.def.kind === 'FACTORY').length;
+    const factoriesHeld = this.units.filter((u) => u.def.kind === 'FACTORY' && !u.dead && u.factoryCtl === 'FRIEND').length;
     return {
       result: this.result ?? 'DEFEAT',
       time: this.time,
@@ -335,6 +418,11 @@ export class Game {
       roundsFired: this.stats.roundsFired,
       objectivesSecured: this.objectives.filter((o) => o.secured).length,
       objectivesTotal: this.objectives.length,
+      inkEarned: Math.round(this.economy.stats.inkEarned),
+      inkSpent: Math.round(this.economy.stats.inkSpent),
+      battalionsDeployed: this.economy.stats.battalionsDeployed,
+      factoriesHeld,
+      factoriesTotal,
     };
   }
 
@@ -355,6 +443,10 @@ export class Game {
     }));
     const detail = sel.length === 1 ? lines[0] : null;
     const detailUnit = sel.length === 1 ? sel[0] : null;
+    const inc = this.economy.incomeOf('FRIEND', this.simCtx());
+    const enemyStrength = this.units.filter(
+      (u) => u.faction === 'ENEMY' && !u.dead && !u.isAir && u.def.kind !== 'HQ' && u.def.kind !== 'FACTORY'
+    ).length;
     return {
       running: this.running,
       paused: this.paused,
@@ -411,6 +503,39 @@ export class Game {
         roundsFired: this.stats.roundsFired,
         missionTime: this.time,
       },
+      ink: Math.floor(this.economy.ink.FRIEND),
+      income: inc.base + inc.sectors + inc.factories,
+      incomeBase: inc.base,
+      incomeSectors: inc.sectors,
+      incomeFactories: inc.factories,
+      sectorsHeld: this.economy.sectorsHeld('FRIEND'),
+      sectorsTotal: this.economy.sectors.length,
+      battalions: FRIEND_BATTALIONS.map((b) => ({
+        ...b,
+        available: this.economy.ink.FRIEND >= b.cost && this.economy.canQueue('FRIEND') && !this.result,
+      })),
+      production: this.economy.productions
+        .filter((p) => p.faction === 'FRIEND')
+        .map((p) => ({
+          id: p.id,
+          battalionId: p.battalion.id,
+          name: p.battalion.name,
+          progress: 1 - p.remaining / p.total,
+          remaining: p.remaining,
+        })),
+      factories: this.units
+        .filter((u) => u.def.kind === 'FACTORY')
+        .map((u) => ({
+          id: u.factoryId ?? String(u.id),
+          name: u.callsign,
+          control: u.factoryCtl,
+          hp: Math.ceil(u.hp),
+          hpMax: u.def.hp,
+          alive: !u.dead,
+          capturing: u.capturing,
+          captureProgress: u.captureT / 7,
+        })),
+      enemyStrength,
     };
   }
 

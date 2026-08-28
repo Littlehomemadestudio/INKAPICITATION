@@ -4,12 +4,13 @@
 // ─────────────────────────────────────────────────────────────
 
 import { UNIT_DEFS, UnitDef, UnitType } from './unitDefs';
-import type { Faction, IntelState, Order, UnitActivity } from '../core/types';
+import type { Faction, IntelState, Order, UnitActivity, Controller } from '../core/types';
 import { Vec2, clamp, dist, angleOf, angDiff, rotateToward, RNG } from '../core/math';
 import type { Terrain } from '../world/terrain';
 import type { EffectsSystem } from './effects';
 import type { ProjectileSystem } from './projectiles';
 import type { AudioEngine } from '../audio/audio';
+import type { InkEconomy } from '../systems/economy';
 import { gridString } from '../core/math';
 
 export interface SimContext {
@@ -18,9 +19,10 @@ export interface SimContext {
   effects: EffectsSystem;
   projectiles: ProjectileSystem;
   audio: AudioEngine;
+  economy: InkEconomy;
   time: number;
   rng: RNG;
-  log: (text: string, level?: 'info' | 'contact' | 'alert' | 'objective') => void;
+  log: (text: string, level?: 'info' | 'contact' | 'alert' | 'objective' | 'economy') => void;
 }
 
 export type AirState = 'STANDBY' | 'INBOUND' | 'PATROL' | 'RTB' | 'REARM' | 'DOWN';
@@ -67,6 +69,15 @@ export class Unit {
   lastSeen = -999;
   knownX = 0;
   knownY = 0;
+
+  // factories
+  factoryId: string | null = null;
+  factoryCtl: Controller = 'ENEMY';
+  captureT = 0;
+  capturing: Controller | null = null;
+
+  // deployment
+  isReinforcement = false;
 
   // aircraft
   airState: AirState = 'STANDBY';
@@ -191,9 +202,14 @@ export class Unit {
 
   update(dt: number, ctx: SimContext) {
     if (this.dead) return;
+    if (this.def.kind === 'FACTORY') {
+      // static structure — no movement, no weapons
+      this.damageFlash = Math.max(0, this.damageFlash - dt * 3);
+      return;
+    }
     this.reloadT -= dt;
     this.damageFlash = Math.max(0, this.damageFlash - dt * 3);
-    if (this.recoil > 0) this.recoil = Math.max(0, this.recoil - dt * 8);
+    this.recoil = Math.max(0, this.recoil - dt * 8);
     if (this.def.kind === 'SPAA') this.radarAngle += dt * 1.35;
 
     if (this.isAir) {
@@ -245,6 +261,7 @@ export class Unit {
       if (this.path.length === 0) {
         this.dest = null;
         this.speedNow = 0;
+        this.isReinforcement = false;
       }
       return;
     }
@@ -317,6 +334,9 @@ export class Unit {
       let bestScore = -Infinity;
       for (const u of this.visibleTargets) {
         if (u.dead || u.faction === this.faction) continue;
+        // factories are engaged on explicit order only — no one wastes
+        // main gun rounds on empty halls by accident
+        if (u.def.kind === 'FACTORY') continue;
         let s = 100 - dist(this.x, this.y, u.x, u.y) / 30;
         // role preferences
         if (this.def.kind === 'MBT') s += u.def.kind === 'MBT' ? 24 : u.def.kind === 'SPAA' ? 30 : 0;
@@ -488,7 +508,7 @@ export class Unit {
         // engage ground targets in range while orbiting
         if (this.ammo > 0 && this.reloadT <= 0 && (this.airState === 'PATROL' || this.airState === 'INBOUND')) {
           for (const u of this.visibleTargets) {
-            if (u.dead || u.isAir) continue;
+            if (u.dead || u.isAir || u.def.kind === 'FACTORY') continue;
             const dd = dist(this.x, this.y, u.x, u.y);
             if (dd < this.def.range) {
               const toT = angleOf(u.x - this.x, u.y - this.y);
@@ -592,9 +612,13 @@ export class Unit {
       if (this.def.kind === 'MBT') d *= 0.28;
       else if (this.def.kind === 'IFV') d *= 0.7;
       else if (this.def.kind === 'HQ') d *= 0.12;
+      else if (this.def.kind === 'FACTORY') d *= 0.06;
     }
     if (projKind === 'SHELL' && this.def.kind === 'HQ') d *= 0.55;
+    if (projKind === 'SHELL' && this.def.kind === 'FACTORY') d *= 0.8;
     if (projKind === 'MISSILE_AIR' && this.def.kind === 'HQ') d *= 0.8;
+    if (projKind === 'MISSILE_AIR' && this.def.kind === 'FACTORY') d *= 1.25;
+    if (projKind === 'ARTY' && this.def.kind === 'FACTORY') d *= 1.15;
     this.hp -= d;
     this.damageFlash = 1;
     if (this.hp <= 0) {
@@ -606,6 +630,49 @@ export class Unit {
   die(ctx: SimContext) {
     this.dead = true;
     const fx = ctx.effects;
+    if (this.def.kind === 'FACTORY') {
+      // ── an ink works dies spectacularly ─────────────────────
+      // initial eruption
+      fx.spawnExplosion(this.x, this.y, {
+        dir: this.rng.range(0, Math.PI * 2),
+        dirStrength: 0.3,
+        scale: 4.6,
+        crater: 18,
+        smoke: 18,
+        debris: 26,
+        stains: 90,
+        ring: true,
+        sound: 'kill',
+        shake: 8,
+      });
+      // secondary structural collapses rolling through the plant
+      fx.scheduleBlasts(this.x, this.y, {
+        count: 8,
+        duration: 5.5,
+        spread: 60,
+        scaleMin: 1.6,
+        scaleMax: 3.1,
+        delay: 0.7,
+      });
+      // a permanent scar and a smoking ruin
+      fx.stampScorch(this.x, this.y, 130, 0.6);
+      fx.stampScorch(this.x + 30, this.y - 20, 70, 0.5);
+      fx.stampScorch(this.x - 34, this.y + 24, 60, 0.5);
+      fx.addRubble({
+        x: this.x,
+        y: this.y,
+        w: 56,
+        h: 38,
+        rot: 0.08,
+        seed: this.rng.next(),
+        born: ctx.time,
+        smokeUntil: ctx.time + 720,
+      });
+      ctx.log(`${this.callsign} DESTROYED — THE WORKS BURN`, 'alert');
+      ctx.economy?.onFactoryDestroyed(this);
+      ctx.audio.explosion('kill', this.x, this.y, 4.4);
+      return;
+    }
     if (this.isAir) {
       // aircraft goes down in a streak of explosions
       const dir = this.angle;
@@ -708,6 +775,10 @@ export class Unit {
           return 'DESTROYED';
       }
     }
+    if (this.def.kind === 'FACTORY') {
+      return 'HOLDING';
+    }
+    if (this.isReinforcement) return 'INBOUND';
     if (this.order.type === 'FIRE_MISSION') return 'FIRE MISSION';
     if (this.target && !this.target.dead) return this.reloadT > 0 ? 'RELOADING' : 'ENGAGING';
     if (this.path.length > 0) return 'MOVING';

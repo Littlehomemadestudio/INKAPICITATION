@@ -76,6 +76,28 @@ export function BriefingOverlay({
         </div>
 
         <div className="grid grid-cols-[120px_1fr] gap-6 mb-7">
+          <SectionLabel>INK &amp; GROUND</SectionLabel>
+          <div className="max-w-[640px]">
+            <p className="text-[12.5px] leading-relaxed text-[#26231c] mb-3.5">
+              Ink is your authority to sustain and expand this operation. It is not gathered from the ground like ore —
+              it is what flows to a force that holds ground worth holding. Read the ledger in the top bar; spend it in
+              the DEPLOY panel. Battalions muster at ASSEMBLY ALPHA in the south-west and march in — they never
+              appear in the middle of a fight.
+            </p>
+            <table className="text-[12px] w-full">
+              <tbody>
+                {b.economy.map(([k, v]) => (
+                  <tr key={k} className="border-b border-[#ddd9cd]">
+                    <td className="py-[4px] pr-4 font-mono text-[10.5px] text-[#17150f] whitespace-nowrap w-[150px]">{k}</td>
+                    <td className="py-[4px] text-[#4c473d]">{v}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-[120px_1fr] gap-6 mb-7">
           <SectionLabel>TASK ORG</SectionLabel>
           <table className="text-[12px] max-w-[640px] w-full">
             <tbody>
@@ -189,6 +211,13 @@ export function EndOverlay({
             <Stat label="OBJECTIVES" value={`${aar.objectivesSecured}/${aar.objectivesTotal}`} />
           </div>
 
+          <div className="grid grid-cols-4 gap-6 mb-7">
+            <Stat label="INK EARNED" value={String(aar.inkEarned)} />
+            <Stat label="INK SPENT" value={String(aar.inkSpent)} />
+            <Stat label="BATTALIONS RAISED" value={String(aar.battalionsDeployed)} />
+            <Stat label="INK WORKS HELD" value={`${aar.factoriesHeld}/${aar.factoriesTotal}`} />
+          </div>
+
           <div className="grid grid-cols-2 gap-8 mb-9">
             <div>
               <div className="font-mono text-[9px] tracking-[0.24em] text-[#6b6557] mb-2 border-b border-[#ddd9cd] pb-1">
@@ -285,10 +314,27 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
           ))}
         </div>
         <hr className="ps-rule mb-6" />
+        <div className="font-mono text-[9px] tracking-[0.24em] text-[#6b6557] mb-2 border-b border-[#ddd9cd] pb-1">
+          THE INK LEDGER
+        </div>
+        <div className="grid grid-cols-2 gap-x-8 gap-y-[5px] mb-6">
+          <p className="text-[11.5px] leading-relaxed text-[#4c473d] col-span-2">
+            A thin trickle of ink arrives from corps no matter how badly things go — you are never out of the fight
+            while you can still take ground. Held sectors and captured ink works pay far more. Destroyed enemy
+            formations yield their worth in ink; the enemy earns the same from your losses. An ink works can be
+            captured intact — or burned to deny it. Both are legitimate decisions.
+          </p>
+          {b.economy.map(([k, v]) => (
+            <div key={k} className="flex items-baseline gap-2.5">
+              <span className="font-mono text-[9.5px] text-[#17150f] whitespace-nowrap">{k}</span>
+              <span className="text-[10.5px] text-[#4c473d]">{v}</span>
+            </div>
+          ))}
+        </div>
         <p className="text-[12px] leading-relaxed text-[#4c473d] mb-6">
-          Reconnaissance reveals the enemy; forests conceal stationary vehicles; artillery reveals itself when it
-          fires. Enemy air defence engages aircraft on station — suppress or avoid it. Ammunition is finite: spend
-          it like a professional.
+          Reconnaissance reveals the enemy; forests conceal stationary vehicles; ridgelines block observation — take
+          the high ground to see. Artillery reveals itself when it fires. Enemy air defence engages aircraft on
+          station — suppress or avoid it. Ammunition is finite: spend it like a professional.
         </p>
         <button
           onClick={onClose}

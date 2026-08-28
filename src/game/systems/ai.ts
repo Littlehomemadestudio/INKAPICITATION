@@ -48,8 +48,22 @@ export class EnemyCommander {
       g.missionCooldown -= dt;
       g.displaceT -= dt;
     }
+
+    // the enemy has a purse too — he rebuilds his force
+    ctx.economy?.aiThink(dt, ctx);
+
+    // defend the ink works when they come under threat
+    this.factoryResponse(ctx);
+
     if (this.timer > 0) return;
     this.timer = 1.4;
+
+    // track any new self-propelled guns that marched in as reinforcements
+    for (const u of ctx.units) {
+      if (u.faction === 'ENEMY' && !u.dead && u.def.kind === 'SPG' && !this.guns.some((g) => g.unit === u)) {
+        this.guns.push({ unit: u, missionCooldown: 8 + Math.random() * 10, displaceT: 0 });
+      }
+    }
 
     const enemies = ctx.units.filter((u) => u.faction === 'ENEMY' && !u.dead && !u.isAir);
     const friends = ctx.units.filter((u) => u.faction === 'FRIEND' && !u.dead && !u.isAir);
@@ -178,6 +192,48 @@ export class EnemyCommander {
       }
     }
   }
+
+  /** if a works is threatened, nearby forces converge to hold it */
+  private factoryResponse(ctx: SimContext) {
+    if (this.factoryAlarmT > 0) {
+      this.factoryAlarmT -= 1.4 * 0.7;
+      return;
+    }
+    for (const f of ctx.units) {
+      if (f.dead || f.def.kind !== 'FACTORY' || f.factoryCtl !== 'ENEMY') continue;
+      // threat: friendlies closing on the works
+      let threat = 0;
+      for (const u of ctx.units) {
+        if (u.dead || u.faction !== 'FRIEND' || u.isAir) continue;
+        if (dist(u.x, u.y, f.x, f.y) < 640) threat++;
+      }
+      if (threat > 0 && (f.capturing === 'FRIEND' || f.hp < f.def.hp * 0.85)) {
+        this.factoryAlarmT = 42;
+        ctx.log(`ENEMY DEFENDS ${f.callsign} — EXPECT RESISTANCE`, 'alert');
+        let sent = 0;
+        const responders = ctx.units
+          .filter(
+            (u) =>
+              u.faction === 'ENEMY' &&
+              !u.dead &&
+              !u.isAir &&
+              u.def.kind !== 'HQ' &&
+              u.def.kind !== 'FACTORY' &&
+              u.def.kind !== 'SPG' &&
+              dist(u.x, u.y, f.x, f.y) < 1900
+          )
+          .sort((a, b) => dist(a.x, a.y, f.x, f.y) - dist(b.x, b.y, f.x, f.y));
+        for (const u of responders) {
+          if (sent++ >= Math.min(threat + 1, 4)) break;
+          u.orderAttackMove({ x: f.x + (Math.random() - 0.5) * 220, y: f.y + (Math.random() - 0.5) * 220 }, ctx);
+          u.defendPos = { x: f.x + (Math.random() - 0.5) * 160, y: f.y + (Math.random() - 0.5) * 160 };
+        }
+        break;
+      }
+    }
+  }
+
+  private factoryAlarmT = 0;
 
   private findCluster(gun: Unit, targets: Unit[]): Vec2 | null {
     let best: Vec2 | null = null;

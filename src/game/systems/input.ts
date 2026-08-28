@@ -187,6 +187,18 @@ export class InputSystem {
     let bd = Infinity;
     for (const u of this.game.units) {
       if (u.dead) continue;
+      if (u.def.kind === 'FACTORY' || u.def.kind === 'HQ') {
+        // structures are orderable targets but never selected
+        if (!friendOnly && u.faction === 'ENEMY') {
+          const d = dist(wx, wy, u.x, u.y);
+          const r = Math.max(u.def.length, u.def.width) * 0.6;
+          if (d < r && d < bd) {
+            bd = d;
+            best = u;
+          }
+        }
+        continue;
+      }
       if (friendOnly && u.faction !== 'FRIEND') continue;
       if (!friendOnly && u.faction === 'ENEMY' && u.intel === 'HIDDEN') continue;
       if (!friendOnly && u.faction === 'ENEMY' && u.intel === 'GHOST') {
@@ -228,7 +240,7 @@ export class InputSystem {
     const w = this.camera.screenToWorld(sx, sy);
     const u = this.unitAt(w.x, w.y, true);
     this.game.audio.uiTick();
-    if (!u) {
+    if (!u || u.def.kind === 'FACTORY' || u.def.kind === 'HQ') {
       if (!additive) this.clearSelection();
       return;
     }
@@ -247,6 +259,7 @@ export class InputSystem {
     const picked: Unit[] = [];
     for (const u of this.game.units) {
       if (u.dead || u.faction !== 'FRIEND') continue;
+      if (u.def.kind === 'FACTORY' || u.def.kind === 'HQ') continue;
       if (u.x >= a.x && u.x <= b.x && u.y >= a.y && u.y <= b.y) picked.push(u);
     }
     this.game.audio.uiTick();

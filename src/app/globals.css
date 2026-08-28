@@ -260,6 +260,56 @@
   animation: ps-slidein 160ms ease-out;
 }
 
+/* ── ink economy instruments ────────────────────────────────── */
+
+/* the ink reserve mark — a solid ink drop, not a glowing crystal */
+.ps-ink-mark {
+  width: 9px;
+  height: 11px;
+  background: var(--ps-paper);
+  clip-path: polygon(50% 0%, 100% 62%, 78% 100%, 22% 100%, 0% 62%);
+  display: inline-block;
+}
+
+.ps-deploy-btn {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  text-align: left;
+  background: var(--ps-panel-2);
+  border: 1px solid var(--ps-line);
+  border-radius: 2px;
+  padding: 4px 6px 3px;
+  cursor: pointer;
+  transition:
+    border-color 120ms linear,
+    background 120ms linear;
+  min-width: 0;
+}
+.ps-deploy-btn:hover:not(:disabled) {
+  border-color: #6b655a;
+  background: #201d18;
+}
+.ps-deploy-btn:disabled {
+  cursor: default;
+}
+.ps-deploy-off {
+  opacity: 0.42;
+}
+
+.ps-kind-chip {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 7px;
+  letter-spacing: 0.06em;
+  color: var(--ps-dim);
+  border: 1px solid #3a352c;
+  border-radius: 1px;
+  padding: 0px 2px;
+  line-height: 1.3;
+}
+.ps-kind-chip[data-k='AIR'] {
+  color: var(--ps-txt);
+  border-color: #5d584d;
+}
+
 /* graceful degradation on narrow viewports (desktop RTS first) */
 @media (max-width: 1280px) {
   .ps-air-panel { display: none; }

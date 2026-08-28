@@ -1,7 +1,8 @@
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · terrain generation
-// Heightmap, river, roads, bridges, forests, villages, contours,
-// passability grid + A* pathfinding.
+// A deliberately composed military landscape: ridgelines, river
+// valley, railway, fords, towns, farms, industrial works, power
+// corridor. Heightmap + contours + passability + A* + LOS grid.
 // ─────────────────────────────────────────────────────────────
 
 import { Noise2D } from '../core/noise';
@@ -14,7 +15,23 @@ export interface TreePoint {
   seed: number;
 }
 
-export type BuildingKind = 'HOUSE' | 'BARN' | 'SHED' | 'HQ_CORE' | 'HQ_SUPPORT' | 'MAST' | 'BUNKER';
+export type BuildingKind =
+  | 'HOUSE'
+  | 'BARN'
+  | 'SHED'
+  | 'SILO'
+  | 'CHURCH'
+  | 'HQ_CORE'
+  | 'HQ_SUPPORT'
+  | 'MAST'
+  | 'BUNKER'
+  | 'FACTORY_HALL'
+  | 'FACTORY_HALL2'
+  | 'CHIMNEY'
+  | 'STORAGE_TANK'
+  | 'DEPOT'
+  | 'SUBSTATION'
+  | 'CHECKPOINT';
 
 export interface Building {
   x: number;
@@ -31,11 +48,27 @@ export interface Bridge {
   angle: number; // across the river
   len: number;
   w: number;
+  rail?: boolean;
 }
 
 export interface RoadPath {
   pts: Vec2[];
   major: boolean;
+  name?: string;
+}
+
+export interface RockPoint {
+  x: number;
+  y: number;
+  r: number;
+  seed: number;
+}
+
+export interface FactorySite {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
 }
 
 export interface ContourSet {
@@ -45,6 +78,7 @@ export interface ContourSet {
 
 const CELL = 64; // pathfinding cell size (m)
 const TREE_CELL = 96;
+const HG_STEP = 32; // height grid for LOS (m)
 
 export class Terrain {
   readonly W = 4096;
@@ -57,12 +91,23 @@ export class Terrain {
 
   /** river centreline */
   river: Vec2[] = [];
+  /** seasonal tributary — dry streambed (visual + light cover) */
+  dryStream: Vec2[] = [];
+  /** shallow crossing point on the river */
+  ford: Vec2 | null = null;
   roads: RoadPath[] = [];
   bridges: Bridge[] = [];
+  railway: Vec2[] = [];
+  railBridges: Bridge[] = [];
   buildings: Building[] = [];
   trees: TreePoint[] = [];
+  rocks: RockPoint[] = [];
+  pylons: Vec2[] = [];
+  powerLine: Vec2[] = [];
+  factories: FactorySite[] = [];
   fields: { x: number; y: number; w: number; h: number; rot: number; tone: number }[] = [];
   labels: { x: number; y: number; text: string; size: number; bold?: boolean }[] = [];
+  spotHeights: { x: number; y: number; h: number }[] = [];
   hillPeak: Vec2 | null = null;
   hillHeight = 0;
 
@@ -70,6 +115,11 @@ export class Terrain {
   gw = 0;
   gh = 0;
   cost!: Float32Array;
+
+  // LOS height grid
+  private hg!: Float32Array;
+  private hgw = 0;
+  private hgh = 0;
 
   // tree spatial hash
   private treeGrid: Map<number, TreePoint[]> = new Map();
@@ -85,17 +135,38 @@ export class Terrain {
   }
 
   // ── height ─────────────────────────────────────────────────
-
+  //
+  // Hand-composed relief — the map is authored, not noise soup:
+  //   · ZAPAD RIDGE  — elongated NE–SW ridgeline in the west
+  //   · HILL 214     — dominant high ground, east-centre
+  //   · HILL 163     — detached knoll north of the river
+  //   · southern rolling rise screening the player's entry
+  //   · NE plateau carrying the enemy HQ
+  //   · river valley carve + dry tributary
+  //
   heightAt(x: number, y: number): number {
     let h = this.baseNoise.fbm(x / 1500, y / 1500, 5) * 26 - 6;
     h += this.detailNoise.fbm(x / 380, y / 380, 3) * 5 - 1.5;
 
-    // hand-composed relief: Hill 214 (east-centre)
+    // ZAPAD RIDGE — four overlapping crests along one spine
+    h += this.gaussEl(x, y, 500, 480, 380, 300, 28);
+    h += this.gaussEl(x, y, 730, 660, 420, 320, 36);
+    h += this.gaussEl(x, y, 950, 840, 400, 300, 30);
+    h += this.gaussEl(x, y, 1140, 1010, 360, 280, 22);
+
+    // HILL 214 — the dominant landform
     h += this.gauss(x, y, 2950, 1180, 620, 58);
-    // west ridge
-    h += this.gauss(x, y, 620, 900, 700, 30);
+    // shoulder south-west of the hill (finger toward the village)
+    h += this.gaussEl(x, y, 2620, 1420, 360, 260, 14);
+
+    // HILL 163 knoll
+    h += this.gauss(x, y, 1550, 680, 360, 26);
+
     // southern rise near player entry
     h += this.gauss(x, y, 1750, 2750, 520, 16);
+    // south-eastern rolling ground
+    h += this.gaussEl(x, y, 3350, 2600, 600, 380, 12);
+
     // north-east plateau toward HQ
     const nx = clamp(x / this.W, 0, 1);
     const ny = 1 - clamp(y / this.H, 0, 1);
@@ -103,9 +174,9 @@ export class Terrain {
 
     // river valley carve
     const dRiver = this.distToPolyline(x, y, this.river);
-    if (dRiver < 130) {
-      const t = 1 - dRiver / 130;
-      h -= smooth01(t) * 9;
+    if (dRiver < 170) {
+      const t = 1 - dRiver / 170;
+      h -= smooth01(t) * 11;
     }
     return Math.max(0, h);
   }
@@ -124,12 +195,59 @@ export class Terrain {
     return amp * t * t * (3 - 2 * t);
   }
 
+  /** elongated gaussian — ridge segments */
+  private gaussEl(x: number, y: number, cx: number, cy: number, rx: number, ry: number, amp: number): number {
+    const dx = (x - cx) / rx;
+    const dy = (y - cy) / ry;
+    const d2 = dx * dx + dy * dy;
+    if (d2 > 1) return 0;
+    const t = 1 - Math.sqrt(d2);
+    return amp * t * t * (3 - 2 * t);
+  }
+
+  // ── LOS over the height grid ───────────────────────────────
+
+  /** terrain line of sight between two points at given eye heights */
+  losClear(ax: number, ay: number, aEye: number, bx: number, by: number, bEye: number): boolean {
+    const d = dist(ax, ay, bx, by);
+    const steps = Math.max(2, Math.ceil(d / 56));
+    for (let s = 1; s < steps; s++) {
+      const t = s / steps;
+      const x = ax + (bx - ax) * t;
+      const y = ay + (by - ay) * t;
+      const beam = aEye + (bEye - aEye) * t;
+      const ground = this.gridHeight(x, y);
+      if (ground > beam + 2.0) return false;
+    }
+    return true;
+  }
+
+  private gridHeight(x: number, y: number): number {
+    const gx = clamp(x / HG_STEP, 0, this.hgw - 1.001);
+    const gy = clamp(y / HG_STEP, 0, this.hgh - 1.001);
+    const ix = Math.floor(gx);
+    const iy = Math.floor(gy);
+    const fx = gx - ix;
+    const fy = gy - iy;
+    const h00 = this.hg[iy * this.hgw + ix];
+    const h10 = this.hg[iy * this.hgw + ix + 1];
+    const h01 = this.hg[(iy + 1) * this.hgw + ix];
+    const h11 = this.hg[(iy + 1) * this.hgw + ix + 1];
+    return (h00 * (1 - fx) + h10 * fx) * (1 - fy) + (h01 * (1 - fx) + h11 * fx) * fy;
+  }
+
   // ── water ──────────────────────────────────────────────────
 
   riverWidth = 30;
 
   isWater(x: number, y: number): boolean {
     return this.distToPolyline(x, y, this.river) < this.riverWidth * 0.5;
+  }
+
+  /** shallow ford — vehicles may wade across, slowly */
+  fordAt(x: number, y: number, r = 46): boolean {
+    if (!this.ford) return false;
+    return dist(x, y, this.ford.x, this.ford.y) < r;
   }
 
   /** bridge within radius */
@@ -153,11 +271,18 @@ export class Terrain {
     return best;
   }
 
+  railFactor(x: number, y: number): number {
+    const d = this.distToPolyline(x, y, this.railway);
+    return d < 14 ? 1 - d / 14 * 0.5 : 0;
+  }
+
   forestDensity(x: number, y: number): number {
     const n = this.forestNoise.fbm(x / 520, y / 520, 4);
-    // bias: more forest in NW quadrant and along river valley slopes
-    const bias = 0.52 - 0.08 * (x / this.W) + 0.06 * (y / this.H);
-    return clamp(n - bias, 0, 1) * 1.6;
+    // NW-biased woodland belt; the valley slopes carry brush
+    const west = 1 - x / this.W;
+    const bias = -0.075 * west + 0.035 * (y / this.H);
+    const v = (n - 0.585 + bias) * 4.2;
+    return clamp(v, 0, 1) * 1.6;
   }
 
   // ── generation ─────────────────────────────────────────────
@@ -177,7 +302,6 @@ export class Terrain {
       { x: 3750, y: 2560 },
       { x: 4140, y: 2680 },
     ];
-    // organic wobble
     for (let i = 1; i < this.river.length - 1; i++) {
       const p = this.river[i];
       const a = rng.range(0, Math.PI * 2);
@@ -185,12 +309,24 @@ export class Terrain {
       p.y += Math.sin(a) * rng.range(20, 70);
     }
 
-    // roads
+    // ford on the southern reach
+    this.ford = { x: 2950 + rng.range(-30, 30), y: 2135 + rng.range(-30, 30) };
+
+    // dry tributary from the west ridge down to the river
+    this.dryStream = [
+      { x: 660, y: 560 },
+      { x: 820, y: 760 },
+      { x: 990, y: 950 },
+      { x: 1130, y: 1120 },
+      { x: 1240, y: 1300 },
+    ];
+
+    // ── road network — every road leads somewhere ────────────
     const mainRoad: Vec2[] = [
       { x: 1560, y: 3120 },
       { x: 1640, y: 2650 },
       { x: 1900, y: 2230 },
-      { x: 2190, y: 1850 }, // village / bridge
+      { x: 2190, y: 1850 }, // town / bridge
       { x: 2480, y: 1360 },
       { x: 2620, y: 860 },
       { x: 2760, y: 360 },
@@ -201,10 +337,11 @@ export class Terrain {
       { x: 700, y: 2060 },
       { x: 1300, y: 1940 },
       { x: 1800, y: 1870 },
-      { x: 2190, y: 1850 }, // village crossroads
-      { x: 2800, y: 1720 },
-      { x: 3380, y: 1520 },
-      { x: 4140, y: 1410 },
+      { x: 2190, y: 1850 }, // town crossroads
+      { x: 2350, y: 1812 }, // east bridge
+      { x: 2800, y: 1730 },
+      { x: 3350, y: 1750 }, // ZAVOD 7 industrial
+      { x: 4140, y: 1620 },
     ];
     // northern flank track (second axis)
     const northTrack: Vec2[] = [
@@ -213,26 +350,62 @@ export class Terrain {
       { x: 1150, y: 1720 },
       { x: 1240, y: 1400 }, // north bridge
       { x: 1500, y: 1120 },
-      { x: 1950, y: 930 },
+      { x: 1960, y: 930 },
       { x: 2450, y: 850 },
       { x: 2900, y: 900 },
     ];
-    for (const pts of [mainRoad, ewRoad, northTrack]) {
+    // southern lane serving ZAVOD 3 and the farm belt
+    const southLane: Vec2[] = [
+      { x: 1640, y: 2650 },
+      { x: 1380, y: 2450 },
+      { x: 1150, y: 2250 }, // ZAVOD 3
+      { x: 700, y: 2280 },
+      { x: -40, y: 2350 },
+    ];
+    // ford track — the southern loop across the wade point
+    const fordTrack: Vec2[] = [
+      { x: 3350, y: 1750 }, // ZAVOD 7
+      { x: 3080, y: 1980 },
+      { x: 2950, y: 2135 }, // FORD
+      { x: 2620, y: 2330 },
+      { x: 2100, y: 2620 },
+      { x: 1640, y: 2650 },
+    ];
+    for (const pts of [mainRoad, ewRoad, northTrack, southLane, fordTrack]) {
       for (let i = 1; i < pts.length - 1; i++) {
-        pts[i].x += rng.range(-36, 36);
-        pts[i].y += rng.range(-36, 36);
+        pts[i].x += rng.range(-30, 30);
+        pts[i].y += rng.range(-30, 30);
       }
     }
     this.roads = [
-      { pts: mainRoad, major: true },
-      { pts: ewRoad, major: true },
-      { pts: northTrack, major: false },
+      { pts: mainRoad, major: true, name: 'MSR VEGA' },
+      { pts: ewRoad, major: true, name: 'HWY 14' },
+      { pts: northTrack, major: false, name: 'NORTH TRACK' },
+      { pts: southLane, major: false, name: 'SOUTH LANE' },
+      { pts: fordTrack, major: false, name: 'FORD TRACK' },
     ];
 
-    // bridges where roads cross the river
+    // ── railway: west edge → across the river → ZAVOD 7 → east ──
+    this.railway = [
+      { x: -60, y: 1130 },
+      { x: 300, y: 1080 },
+      { x: 610, y: 1012 }, // rail bridge
+      { x: 1000, y: 1020 },
+      { x: 1600, y: 1060 },
+      { x: 2200, y: 1150 },
+      { x: 2900, y: 1380 },
+      { x: 3380, y: 1620 },
+      { x: 3800, y: 1660 },
+      { x: 4160, y: 1690 },
+    ];
+    for (let i = 1; i < this.railway.length - 1; i++) {
+      this.railway[i].x += rng.range(-22, 22);
+      this.railway[i].y += rng.range(-16, 16);
+    }
+
+    // ── bridges where roads cross the river ──────────────────
     this.bridges = [];
     const addBridge = (rx: number, ry: number) => {
-      // angle perpendicular to river direction at that point
       const dir = this.polylineDirAt(rx, ry, this.river);
       this.bridges.push({
         x: rx,
@@ -242,30 +415,91 @@ export class Terrain {
         w: 22,
       });
     };
-    addBridge(2168, 1760); // main road bridge at village
+    addBridge(2168, 1760); // MSR bridge at the town
     addBridge(1240, 1400); // northern track bridge
+    addBridge(2352, 1812); // east bridge on HWY 14
+    // rail bridge — scenery only, not vehicle passable
+    const railDir = this.polylineDirAt(610, 1012, this.river);
+    this.railBridges.push({
+      x: 610,
+      y: 1012,
+      angle: railDir + Math.PI / 2,
+      len: this.riverWidth + 40,
+      w: 12,
+      rail: true,
+    });
 
-    // village at crossroads
-    this.buildVillage(2190, 1850, rng);
+    // ── the town at the crossroads ────────────────────────────
+    this.buildTown(2190, 1850, rng);
+
+    // ── ink factories — serious military-industrial works ────
+    this.factories = [
+      { id: 'MOLOT9', name: 'MOLot 9', x: 1520, y: 880 },
+      { id: 'ZAVOD3', name: 'ZAVOD 3', x: 1150, y: 2250 },
+      { id: 'ZAVOD7', name: 'ZAVOD 7', x: 3350, y: 1750 },
+    ];
+    this.buildFactory(this.factories[0], rng, 0.86); // small works
+    this.buildFactory(this.factories[1], rng, 1.0);
+    this.buildFactory(this.factories[2], rng, 1.25); // main combine
 
     // enemy HQ compound NE
     this.buildHQ(3440, 640, rng);
 
-    // scattered farm buildings
-    const farms = [
+    // checkpoint at the town bridge approach
+    this.buildings.push({ x: 2136, y: 1802, w: 10, h: 6, rot: 0.9, kind: 'CHECKPOINT' });
+    this.buildings.push({ x: 2148, y: 1790, w: 7, h: 5, rot: 0.4, kind: 'BUNKER' });
+
+    // scattered farmsteads — each a logical little cluster
+    const farms: [number, number][] = [
       [900, 1400],
       [1450, 2450],
       [2750, 1450],
-      [3200, 1950],
+      [3250, 2150],
       [1750, 900],
+      [2350, 2760],
     ];
     for (const [fx, fy] of farms) {
-      this.buildVillage(fx + rng.range(-30, 30), fy + rng.range(-30, 30), rng, 2);
+      this.buildFarm(fx + rng.range(-30, 30), fy + rng.range(-30, 30), rng);
     }
 
-    // trees
+    // ── power corridor: ZAVOD 7 substation → enemy HQ ─────────
+    this.powerLine = [
+      { x: 3380, y: 1700 },
+      { x: 3420, y: 1360 },
+      { x: 3470, y: 1010 },
+      { x: 3480, y: 660 },
+      { x: 3430, y: 300 },
+    ];
+    this.pylons = this.powerLine.map((p) => ({ ...p }));
+
+    // ── rocks — boulder fields on the steep ground ─────────
+    this.rocks = [];
+    for (let i = 0; i < 2600; i++) {
+      const x = rng.range(60, this.W - 60);
+      const y = rng.range(60, this.H - 60);
+      const s = this.slopeAt(x, y);
+      if (s < 0.105 || s > 0.4) continue;
+      if (this.isWater(x, y) || this.forestDensity(x, y) > 0.6) continue;
+      if (this.roadFactor(x, y) > 0.05 || this.railFactor(x, y) > 0.1) continue;
+      if (this.buildingAt(x, y, 30)) continue;
+      if (rng.chance(0.3)) {
+        // a small boulder cluster, not a lone pebble
+        const nRocks = rng.int(1, 3);
+        for (let r = 0; r < nRocks; r++) {
+          this.rocks.push({
+            x: x + rng.range(-9, 9),
+            y: y + rng.range(-9, 9),
+            r: rng.range(1.8, 5.2),
+            seed: rng.next(),
+          });
+        }
+      }
+      if (this.rocks.length > 170) break;
+    }
+
+    // ── trees — forest masses + planted treelines ────────────
     this.trees = [];
-    const step = 30;
+    const step = 28;
     for (let y = step; y < this.H; y += step) {
       for (let x = step; x < this.W; x += step) {
         const jx = x + rng.range(-12, 12);
@@ -273,23 +507,14 @@ export class Terrain {
         if (this.forestDensity(jx, jy) < 0.42) continue;
         if (this.isWater(jx, jy) || this.bridgeAt(jx, jy, 70)) continue;
         if (this.distToPolyline(jx, jy, this.river) < this.riverWidth * 0.5 + 34) continue;
-        if (this.roadFactor(jx, jy) > 0.08) continue;
-        if (this.slopeAt(jx, jy) > 0.16) continue;
+        if (this.roadFactor(jx, jy) > 0.08 || this.railFactor(jx, jy) > 0.15) continue;
+        if (this.slopeAt(jx, jy) > 0.17) continue;
         if (this.buildingAt(jx, jy, 34)) continue;
         this.trees.push({ x: jx, y: jy, r: rng.range(6.5, 12.5), seed: rng.next() });
       }
     }
-    for (const t of this.trees) {
-      const key = this.treeKey(t.x, t.y);
-      let arr = this.treeGrid.get(key);
-      if (!arr) {
-        arr = [];
-        this.treeGrid.set(key, arr);
-      }
-      arr.push(t);
-    }
 
-    // agricultural parcels — patchwork of fields on the flatter ground
+    // ── agricultural parcels — patchwork on the flatter ground ──
     this.fields = [];
     const fieldTones = [0.04, 0.08, 0.115, 0.06];
     let toneI = 0;
@@ -302,6 +527,7 @@ export class Terrain {
         if (this.slopeAt(fx, fy) > 0.085) continue;
         if (this.forestDensity(fx, fy) > 0.3) continue;
         if (this.distToPolyline(fx, fy, this.river) < 90) continue;
+        if (this.railFactor(fx, fy) > 0.05) continue;
         if (this.buildingAt(fx, fy, Math.max(fw, fh) * 0.7 + 30)) continue;
         let nearRoad = false;
         for (const r of this.roads) {
@@ -319,54 +545,199 @@ export class Terrain {
       }
     }
 
-    // labels
+    // planted treelines along selected field boundaries — the
+    // man-made structure of the farmland reads instantly
+    for (const f of this.fields) {
+      if (!rng.chance(0.42)) continue;
+      const cos = Math.cos(f.rot);
+      const sin = Math.sin(f.rot);
+      const edge = rng.chance(0.5) ? 1 : -1;
+      for (let t = -0.44; t <= 0.44; t += 30 / Math.max(f.w, 120)) {
+        const lx = t * f.w;
+        const ly = edge * (f.h / 2 + 13);
+        const wx = f.x + lx * cos - ly * sin;
+        const wy = f.y + lx * sin + ly * cos;
+        if (this.isWater(wx, wy) || this.roadFactor(wx, wy) > 0.1) continue;
+        if (this.buildingAt(wx, wy, 24)) continue;
+        this.trees.push({ x: wx, y: wy, r: rng.range(5, 8), seed: rng.next() });
+      }
+    }
+
+    for (const t of this.trees) {
+      const key = this.treeKey(t.x, t.y);
+      let arr = this.treeGrid.get(key);
+      if (!arr) {
+        arr = [];
+        this.treeGrid.set(key, arr);
+      }
+      arr.push(t);
+    }
+
+    // ── labels & spot heights ─────────────────────────────────
     this.labels = [
       { x: 2950, y: 1180, text: 'HILL 214', size: 30, bold: true },
       { x: 2190, y: 1790, text: 'NOVY MOST', size: 24 },
       { x: 3440, y: 940, text: 'OBJ KRAKEN', size: 22, bold: true },
       { x: 2190, y: 1930, text: 'OBJ ECHO', size: 20, bold: true },
       { x: 2950, y: 1300, text: 'OBJ FOXTROT', size: 20, bold: true },
+      { x: 830, y: 700, text: 'ZAPAD RIDGE', size: 22 },
+      { x: 1550, y: 545, text: 'HILL 163', size: 18 },
+      { x: 3350, y: 1700, text: 'ZAVOD 7', size: 20, bold: true },
+      { x: 1150, y: 2200, text: 'ZAVOD 3', size: 18, bold: true },
+      { x: 1520, y: 830, text: 'MOLot 9', size: 18, bold: true },
+      { x: 2380, y: 1880, text: 'EAST BRIDGE', size: 15 },
+      { x: 3000, y: 2260, text: 'FORD', size: 15 },
       { x: 1000, y: 800, text: 'ZAPAD FOREST', size: 22 },
       { x: 3400, y: 2400, text: 'VYSOKA POLJANA', size: 20 },
+      { x: 1900, y: 2650, text: 'SOUTH FARMS', size: 18 },
+      { x: 500, y: 1070, text: 'RAIL LINE', size: 14 },
     ];
     this.hillPeak = { x: 2950, y: 1180 };
     this.hillHeight = this.heightAt(2950, 1180);
 
+    this.spotHeights = [
+      { x: 2950, y: 1180, h: Math.round(this.heightAt(2950, 1180)) },
+      { x: 1550, y: 680, h: Math.round(this.heightAt(1550, 680)) },
+      { x: 730, y: 660, h: Math.round(this.heightAt(730, 660)) },
+      { x: 1750, y: 2750, h: Math.round(this.heightAt(1750, 2750)) },
+      { x: 3440, y: 640, h: Math.round(this.heightAt(3440, 640)) },
+      { x: 2560, y: 1600, h: Math.round(this.heightAt(2560, 1600)) },
+    ];
+
     // pathfinding grid
     this.buildCostGrid();
+
+    // LOS height grid
+    this.buildHeightGrid();
 
     // contour extraction
     this.contours = this.extractContours();
   }
 
-  private buildVillage(cx: number, cy: number, rng: RNG, count = 7) {
+  // ── settlement builders ────────────────────────────────────
+
+  private buildTown(cx: number, cy: number, rng: RNG) {
+    // buildings string along both roads — a real crossroads town
+    const along = (
+      dx: number,
+      dy: number,
+      n: number,
+      side: number,
+      kinds: BuildingKind[]
+    ) => {
+      for (let i = 0; i < n; i++) {
+        const t = (i + 1) / (n + 1);
+        const bx = cx + dx * (t - 0.5) * 2 + -dy * side * rng.range(52, 74);
+        const by = cy + dy * (t - 0.5) * 2 + dx * side * rng.range(52, 74);
+        if (this.isWater(bx, by) || this.roadFactor(bx, by) > 0.1) continue;
+        const kind = kinds[i % kinds.length];
+        const w = kind === 'BARN' ? rng.range(26, 34) : rng.range(15, 22);
+        const h = kind === 'BARN' ? rng.range(14, 18) : rng.range(11, 15);
+        this.buildings.push({
+          x: bx,
+          y: by,
+          w,
+          h,
+          rot: Math.atan2(dy, dx) + rng.range(-0.12, 0.12),
+          kind,
+        });
+      }
+    };
+    along(1, -0.36, 4, 1, ['HOUSE', 'HOUSE', 'BARN', 'HOUSE']); // along MSR north
+    along(1, -0.36, 3, -1, ['HOUSE', 'SHED', 'HOUSE']);
+    along(1, 0.12, 3, 1, ['HOUSE', 'HOUSE', 'SHED']); // along HWY west
+    along(1, 0.12, 2, -1, ['HOUSE', 'BARN']);
+    along(0.94, 0.34, 3, 1, ['HOUSE', 'HOUSE', 'BARN']); // along HWY east
+    along(0.94, 0.34, 2, -1, ['SHED', 'HOUSE']);
+    // church — the town landmark, near the bridge
+    this.buildings.push({ x: 2236, y: 1782, w: 13, h: 22, rot: 0.28, kind: 'CHURCH' });
+  }
+
+  private buildFarm(cx: number, cy: number, rng: RNG) {
     const spots: [number, number][] = [
-      [-120, -110], [95, -130], [-160, 60], [140, 85], [-40, 170], [40, -190], [-210, -30], [180, -20],
+      [-58, -40], [44, -66], [-86, 44], [62, 58], [-8, 96],
     ];
-    const kinds: BuildingKind[] = ['HOUSE', 'BARN', 'HOUSE', 'SHED', 'HOUSE', 'BARN', 'HOUSE', 'SHED'];
-    for (let i = 0; i < count; i++) {
+    const kinds: BuildingKind[] = ['HOUSE', 'BARN', 'SHED', 'SILO', 'BARN'];
+    for (let i = 0; i < 5; i++) {
       const s = spots[i % spots.length];
-      const bx = cx + s[0] + rng.range(-18, 18);
-      const by = cy + s[1] + rng.range(-18, 18);
+      const bx = cx + s[0] + rng.range(-14, 14);
+      const by = cy + s[1] + rng.range(-14, 14);
       if (this.isWater(bx, by) || this.roadFactor(bx, by) > 0.1) continue;
       const kind = kinds[i % kinds.length];
-      const w = kind === 'BARN' ? rng.range(26, 34) : rng.range(15, 22);
-      const h = kind === 'BARN' ? rng.range(14, 18) : rng.range(11, 15);
-      this.buildings.push({ x: bx, y: by, w, h, rot: rng.range(-0.25, 0.25) + (rng.chance(0.5) ? 0 : Math.PI / 2), kind });
+      let w: number;
+      let h: number;
+      if (kind === 'BARN') { w = rng.range(26, 32); h = rng.range(14, 17); }
+      else if (kind === 'SILO') { w = rng.range(8, 10); h = rng.range(8, 10); }
+      else if (kind === 'SHED') { w = rng.range(12, 16); h = rng.range(9, 12); }
+      else { w = rng.range(15, 20); h = rng.range(11, 14); }
+      this.buildings.push({
+        x: bx,
+        y: by,
+        w,
+        h,
+        rot: rng.range(-0.25, 0.25) + (rng.chance(0.5) ? 0 : Math.PI / 2),
+        kind,
+      });
     }
   }
 
+  /** an ink works: halls, chimney, tank farm, depot — scaled by significance */
+  private buildFactory(site: FactorySite, rng: RNG, scale: number) {
+    const { x, y } = site;
+    // main production hall
+    this.buildings.push({ x, y, w: 42 * scale, h: 24 * scale, rot: 0.08, kind: 'FACTORY_HALL' });
+    // second hall at an angle — the plant grew in stages
+    this.buildings.push({
+      x: x - 44 * scale,
+      y: y + 30 * scale,
+      w: 26 * scale,
+      h: 16 * scale,
+      rot: 0.42,
+      kind: 'FACTORY_HALL2',
+    });
+    // chimney — the signature
+    this.buildings.push({ x: x + 26 * scale, y: y - 18 * scale, w: 7, h: 7, rot: 0, kind: 'CHIMNEY' });
+    // fuel / solvent tank farm
+    const tanks = Math.round(2 + scale);
+    for (let i = 0; i < tanks; i++) {
+      this.buildings.push({
+        x: x + (30 + i * 17) * scale,
+        y: y + 26 * scale,
+        w: 12,
+        h: 12,
+        rot: 0,
+        kind: 'STORAGE_TANK',
+      });
+    }
+    // stores depot
+    this.buildings.push({
+      x: x - 20 * scale,
+      y: y - 34 * scale,
+      w: 16 * scale,
+      h: 10 * scale,
+      rot: -0.2,
+      kind: 'DEPOT',
+    });
+    // electrical substation feeding the works
+    this.buildings.push({ x: x - 46 * scale, y: y - 24 * scale, w: 11, h: 8, rot: 0.1, kind: 'SUBSTATION' });
+  }
+
   private buildHQ(cx: number, cy: number, rng: RNG) {
-    // compound: core bunker + support structures + mast, arranged deliberately
+    void rng;
+    // compound: core bunker + support structures + masts, arranged deliberately
     this.buildings.push({ x: cx, y: cy, w: 34, h: 26, rot: 0.18, kind: 'HQ_CORE' });
     this.buildings.push({ x: cx - 66, y: cy + 42, w: 20, h: 14, rot: -0.1, kind: 'HQ_SUPPORT' });
     this.buildings.push({ x: cx + 62, y: cy - 48, w: 18, h: 13, rot: 0.3, kind: 'HQ_SUPPORT' });
     this.buildings.push({ x: cx + 74, y: cy + 40, w: 15, h: 11, rot: -0.25, kind: 'SHED' });
     this.buildings.push({ x: cx - 48, y: cy - 62, w: 7, h: 7, rot: 0, kind: 'MAST' });
+    this.buildings.push({ x: cx - 92, y: cy - 30, w: 6, h: 6, rot: 0, kind: 'MAST' });
+    this.buildings.push({ x: cx + 40, y: cy - 88, w: 6, h: 6, rot: 0, kind: 'MAST' });
     // small perimeter bunkers
     this.buildings.push({ x: cx - 120, y: cy + 110, w: 12, h: 9, rot: 0.6, kind: 'BUNKER' });
     this.buildings.push({ x: cx + 130, y: cy + 96, w: 12, h: 9, rot: -0.5, kind: 'BUNKER' });
     this.buildings.push({ x: cx + 8, y: cy + 150, w: 12, h: 9, rot: 0.05, kind: 'BUNKER' });
+    // substation at the power line terminus
+    this.buildings.push({ x: cx - 10, y: cy - 118, w: 12, h: 9, rot: 0.1, kind: 'SUBSTATION' });
   }
 
   buildingAt(x: number, y: number, pad = 0): Building | null {
@@ -482,8 +853,10 @@ export class Terrain {
         const cx = gx * CELL + CELL / 2;
         const cy = gy * CELL + CELL / 2;
         let c: number;
-        if (this.isWater(cx, cy) && !this.bridgeAt(cx, cy, CELL * 0.9)) {
-          c = -1; // impassable
+        if (this.isWater(cx, cy) && !this.bridgeAt(cx, cy, CELL * 0.9) && !this.fordAt(cx, cy, CELL)) {
+          c = -1; // impassable water
+        } else if (this.fordAt(cx, cy, CELL)) {
+          c = 3.6; // wading — slow but possible
         } else {
           c = 1;
           c += this.slopeAt(cx, cy) * 14;
@@ -491,10 +864,22 @@ export class Terrain {
           if (f > 0.42) c += 2.4;
           const r = this.roadFactor(cx, cy);
           if (r > 0.05) c = Math.min(c, r > 0.5 ? 0.34 : 0.6);
+          if (this.railFactor(cx, cy) > 0.4) c += 1.2;
           if (this.buildingAt(cx, cy, 10)) c += 5;
           if (this.bridgeAt(cx, cy, CELL * 0.9)) c = 0.5;
         }
         this.cost[gy * this.gw + gx] = c;
+      }
+    }
+  }
+
+  private buildHeightGrid() {
+    this.hgw = Math.ceil(this.W / HG_STEP) + 1;
+    this.hgh = Math.ceil(this.H / HG_STEP) + 1;
+    this.hg = new Float32Array(this.hgw * this.hgh);
+    for (let j = 0; j < this.hgh; j++) {
+      for (let i = 0; i < this.hgw; i++) {
+        this.hg[j * this.hgw + i] = this.heightAt(i * HG_STEP, j * HG_STEP);
       }
     }
   }
@@ -613,7 +998,7 @@ export class Terrain {
       const t = s / steps;
       const x = a.x + (b.x - a.x) * t;
       const y = a.y + (b.y - a.y) * t;
-      if (this.isWater(x, y) && !this.bridgeAt(x, y, 30)) return false;
+      if (this.isWater(x, y) && !this.bridgeAt(x, y, 30) && !this.fordAt(x, y, 40)) return false;
       if (this.slopeAt(x, y) > 0.75) return false;
     }
     return true;

@@ -1,18 +1,16 @@
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · master renderer
-// Layer composition: paper → features → scars → wrecks → units
-// → projectiles → ink → smoke. The battlefield is the hero.
+// Layer composition: paper → features → craters → rubble →
+// sectors → objectives → factories → wrecks → units → ink →
+// smoke. The battlefield is the hero; command marks stay quiet.
 // ─────────────────────────────────────────────────────────────
 
 import { Camera } from '../systems/camera';
-import { TerrainRenderer } from './terrainRender';
-import type { EffectsSystem } from '../entities/effects';
-import type { ProjectileSystem } from '../entities/projectiles';
 import type { Unit } from '../entities/units';
 import type { Game } from '../Game';
 import { drawVehicle, drawSelectionBrackets, FRIEND_STYLE, ENEMY_STYLE, WRECK_STYLE } from '../entities/unitDraw';
 import { clamp } from '../core/math';
-import type { ObjectiveState } from '../core/types';
+import type { ObjectiveState, Sector } from '../core/types';
 
 interface HoverLabel {
   sx: number;
@@ -25,6 +23,7 @@ export class Renderer {
   private monoFont = 'ui-monospace, monospace';
   private sansFont = 'system-ui, sans-serif';
   minimapBase: HTMLCanvasElement | null = null;
+  private grainPattern: CanvasPattern | null = null;
 
   initFonts() {
     try {
@@ -50,9 +49,13 @@ export class Renderer {
     game.terrainRenderer.drawBase(ctx, cam, game.effects.scars);
     game.terrainRenderer.drawFeatures(ctx, cam);
     game.effects.drawCraters(ctx, cam);
+    game.effects.drawRubble(ctx, cam);
 
     const hovers: HoverLabel[] = [];
+    this.drawSectors(ctx, game, cam);
+    this.drawAssembly(ctx, game, cam);
     this.drawObjectives(ctx, game, cam);
+    this.drawFactories(ctx, game, cam, hovers);
     this.drawWrecks(ctx, game, cam);
     this.drawUnits(ctx, game, cam, hovers);
     game.projectiles.draw(ctx);
@@ -73,15 +76,126 @@ export class Renderer {
   private drawPaperGrain(ctx: CanvasRenderingContext2D, game: Game, cam: Camera) {
     const strength = clamp((cam.zoom - 0.35) * 1.1, 0, 0.55);
     if (strength <= 0.02) return;
-    const pat = ctx.createPattern(game.terrainRenderer.grain, 'repeat');
-    if (!pat) return;
+    if (!this.grainPattern) {
+      this.grainPattern = ctx.createPattern(game.terrainRenderer.grain, 'repeat');
+      if (!this.grainPattern) return;
+    }
     const ox = ((-cam.x * cam.zoom) % 256 + 256) % 256;
     const oy = ((-cam.y * cam.zoom) % 256 + 256) % 256;
     ctx.save();
     ctx.translate(ox - 256, oy - 256);
     ctx.globalAlpha = strength;
-    ctx.fillStyle = pat;
+    ctx.fillStyle = this.grainPattern;
     ctx.fillRect(0, 0, cam.viewW + 512, cam.viewH + 512);
+    ctx.restore();
+  }
+
+  // ── strategic sectors ──────────────────────────────────────
+
+  private drawSectors(ctx: CanvasRenderingContext2D, game: Game, cam: Camera) {
+    if (cam.zoom > 1.6) return; // at close range the ground speaks for itself
+    for (const s of game.economy.sectors) {
+      const inView =
+        s.pos.x + s.radius > cam.viewX &&
+        s.pos.x - s.radius < cam.viewX + cam.viewW &&
+        s.pos.y + s.radius > cam.viewY &&
+        s.pos.y - s.radius < cam.viewY + cam.viewH;
+      if (!inView) continue;
+      this.drawSector(ctx, s, cam);
+    }
+  }
+
+  private drawSector(ctx: CanvasRenderingContext2D, s: Sector, cam: Camera) {
+    const strong = cam.zoom < 0.7;
+    ctx.save();
+    // boundary — a surveyed area, not a video game circle
+    ctx.strokeStyle =
+      s.control === 'FRIEND' ? 'rgba(20,17,12,0.55)' : s.control === 'ENEMY' ? 'rgba(80,74,62,0.5)' : 'rgba(110,104,90,0.38)';
+    ctx.lineWidth = Math.max(1, 1 / cam.zoom);
+    ctx.setLineDash([16, 12]);
+    ctx.beginPath();
+    ctx.arc(s.pos.x, s.pos.y, s.radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // inner tick ring at quarter radius
+    if (strong) {
+      ctx.globalAlpha = 0.5;
+      ctx.setLineDash([3, 14]);
+      ctx.beginPath();
+      ctx.arc(s.pos.x, s.pos.y, s.radius * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+
+    // capture progress — an arc filling as the ground changes hands
+    if (s.capturing && s.captureT > 0.2) {
+      const frac = clamp(s.captureT / s.captureTime, 0, 1);
+      ctx.strokeStyle = s.capturing === 'FRIEND' ? '#141210' : '#5a544a';
+      ctx.lineWidth = Math.max(2.2, 2.6 / cam.zoom);
+      ctx.beginPath();
+      ctx.arc(s.pos.x, s.pos.y, s.radius * 0.72, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // ownership mark — square for friendly, hollow for enemy, dot for neutral
+    const ms = Math.max(9, 12 / cam.zoom);
+    if (s.control === 'FRIEND') {
+      ctx.fillStyle = 'rgba(20,17,12,0.92)';
+      ctx.fillRect(s.pos.x - ms / 2, s.pos.y - ms / 2, ms, ms);
+      ctx.fillStyle = '#f3f1ea';
+      ctx.fillRect(s.pos.x - ms * 0.14, s.pos.y - ms * 0.14, ms * 0.28, ms * 0.28);
+    } else if (s.control === 'ENEMY') {
+      ctx.strokeStyle = 'rgba(70,64,52,0.9)';
+      ctx.lineWidth = Math.max(1.4, 1.6 / cam.zoom);
+      ctx.strokeRect(s.pos.x - ms / 2, s.pos.y - ms / 2, ms, ms);
+      ctx.fillStyle = 'rgba(70,64,52,0.75)';
+      ctx.fillRect(s.pos.x - ms * 0.14, s.pos.y - ms * 0.14, ms * 0.28, ms * 0.28);
+    } else {
+      ctx.strokeStyle = 'rgba(96,90,76,0.8)';
+      ctx.lineWidth = Math.max(1.1, 1.2 / cam.zoom);
+      ctx.beginPath();
+      ctx.arc(s.pos.x, s.pos.y, ms * 0.42, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // designation
+    if (cam.zoom > 0.2) {
+      const size = clamp(12 / cam.zoom + 5, 11, 26);
+      ctx.font = `600 ${size}px ${this.sansFont}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const label = `${s.name} · +${s.income.toFixed(1)}`;
+      ctx.strokeStyle = 'rgba(243,241,234,0.85)';
+      ctx.lineWidth = size * 0.22;
+      ctx.strokeText(label, s.pos.x, s.pos.y - ms * 1.4);
+      ctx.fillStyle = 'rgba(28,25,19,0.85)';
+      ctx.fillText(label, s.pos.x, s.pos.y - ms * 1.4);
+    }
+    ctx.restore();
+  }
+
+  /** the staging area — where purchased battalions arrive */
+  private drawAssembly(ctx: CanvasRenderingContext2D, game: Game, cam: Camera) {
+    if (game.result) return;
+    const a = game.economy.friendlyAssembly;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(20,17,12,0.4)';
+    ctx.lineWidth = Math.max(1, 1 / cam.zoom);
+    ctx.setLineDash([10, 8]);
+    ctx.strokeRect(a.x - 130, a.y - 100, 260, 200);
+    ctx.setLineDash([]);
+    if (cam.zoom > 0.3) {
+      const size = clamp(10 / cam.zoom + 4, 10, 20);
+      ctx.font = `600 ${size}px ${this.sansFont}`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(28,25,19,0.6)';
+      ctx.strokeStyle = 'rgba(243,241,234,0.8)';
+      ctx.lineWidth = size * 0.2;
+      const t = 'ASSEMBLY ALPHA';
+      ctx.strokeText(t, a.x, a.y - 112);
+      ctx.fillText(t, a.x, a.y - 112);
+    }
     ctx.restore();
   }
 
@@ -127,6 +241,117 @@ export class Renderer {
       ctx.strokeText(text, obj.pos.x, obj.pos.y - size - 22);
       ctx.fillText(text, obj.pos.x, obj.pos.y - size - 22);
       ctx.restore();
+    }
+  }
+
+  // ── ink works (factory structures) ─────────────────────────
+
+  private drawFactories(ctx: CanvasRenderingContext2D, game: Game, cam: Camera, hovers: HoverLabel[]) {
+    for (const u of game.units) {
+      if (u.def.kind !== 'FACTORY') continue;
+      if (u.dead) continue;
+      const zx = u.x;
+      const zy = u.y;
+      const halfW = u.def.length * 0.62;
+      const halfH = u.def.width * 0.85;
+
+      ctx.save();
+      ctx.translate(zx, zy);
+      ctx.rotate(0.08);
+
+      // perimeter — surveyed boundary of the installation
+      const friendly = u.factoryCtl === 'FRIEND';
+      const neutral = u.factoryCtl === 'NEUTRAL';
+      ctx.strokeStyle = friendly
+        ? 'rgba(20,17,12,0.8)'
+        : neutral
+          ? 'rgba(104,98,84,0.65)'
+          : 'rgba(76,70,58,0.8)';
+      ctx.lineWidth = Math.max(1.3, 1.5 / cam.zoom);
+      ctx.setLineDash([14, 9]);
+      ctx.strokeRect(-halfW, -halfH, halfW * 2, halfH * 2);
+      ctx.setLineDash([]);
+
+      // capture progress arc across the works
+      if (u.capturing && u.captureT > 0.2) {
+        const frac = clamp(u.captureT / 7, 0, 1);
+        ctx.strokeStyle = u.capturing === 'FRIEND' ? '#141210' : '#5a544a';
+        ctx.lineWidth = Math.max(2.6, 3 / cam.zoom);
+        ctx.beginPath();
+        ctx.arc(0, 0, Math.max(halfW, halfH) * 1.12, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // control pennant — pole and flag at the works corner
+      const px = halfW * 0.8;
+      const py = -halfH * 0.8;
+      ctx.strokeStyle = '#26221b';
+      ctx.lineWidth = Math.max(1, 1.1 / cam.zoom);
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px, py - 16);
+      ctx.stroke();
+      ctx.beginPath();
+      if (friendly) {
+        ctx.fillStyle = '#141210';
+        ctx.moveTo(px, py - 16);
+        ctx.lineTo(px + 11, py - 12.5);
+        ctx.lineTo(px, py - 9);
+        ctx.closePath();
+        ctx.fill();
+      } else if (neutral) {
+        ctx.strokeStyle = 'rgba(96,90,76,0.9)';
+        ctx.lineWidth = Math.max(1, 1.1 / cam.zoom);
+        ctx.moveTo(px, py - 16);
+        ctx.lineTo(px + 11, py - 12.5);
+        ctx.lineTo(px, py - 9);
+        ctx.closePath();
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = 'rgba(82,76,64,0.9)';
+        ctx.moveTo(px, py - 16);
+        ctx.lineTo(px + 11, py - 12.5);
+        ctx.lineTo(px, py - 9);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // designation plate
+      if (cam.zoom > 0.24) {
+        const size = clamp(11 / cam.zoom + 5, 10, 24);
+        ctx.font = `600 ${size}px ${this.sansFont}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const status = friendly ? 'HOLDING · +5 INK/S' : neutral ? 'UNCLAIMED · +5 INK/S' : 'ENEMY HELD · +5 INK/S';
+        const label = `${u.callsign} — ${status}`;
+        ctx.strokeStyle = 'rgba(243,241,234,0.88)';
+        ctx.lineWidth = size * 0.22;
+        ctx.strokeText(label, 0, -halfH - size * 0.9);
+        ctx.fillStyle = friendly ? 'rgba(24,21,15,0.92)' : 'rgba(46,42,34,0.85)';
+        ctx.fillText(label, 0, -halfH - size * 0.9);
+      }
+
+      // damage: soot creeping across the works
+      if (u.hp < u.def.hp * 0.7) {
+        const dmg = 1 - u.hp / u.def.hp;
+        ctx.fillStyle = `rgba(22,18,12,${0.18 * dmg})`;
+        ctx.fillRect(-halfW, -halfH, halfW * 2, halfH * 2);
+      }
+      ctx.restore();
+
+      if (game.input.hoverUnit === u) {
+        const s = cam.worldToScreen(zx, zy);
+        hovers.push({
+          sx: s.x,
+          sy: s.y,
+          hostile: !friendly,
+          lines: [
+            `${u.callsign} · INK WORKS`,
+            friendly ? 'FRIENDLY — PRODUCING' : neutral ? 'UNCLAIMED — CAPTURE TO DRAW INK' : 'ENEMY — CAPTURE OR DESTROY',
+            `INTEGRITY ${Math.ceil((u.hp / u.def.hp) * 100)}%`,
+          ],
+        });
+      }
     }
   }
 
@@ -198,7 +423,7 @@ export class Renderer {
     const ground: Unit[] = [];
     const air: Unit[] = [];
     for (const u of game.units) {
-      if (u.dead) continue;
+      if (u.dead || u.def.kind === 'FACTORY') continue;
       if (u.isAir) {
         if (u.airState === 'STANDBY' || u.airState === 'REARM') continue;
         air.push(u);
@@ -494,12 +719,65 @@ export class Renderer {
       }
     }
 
+    // sectors — ownership diamonds
+    for (const s of game.economy.sectors) {
+      const x = s.pos.x * sx;
+      const y = s.pos.y * sy;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(Math.PI / 4);
+      const s2 = 3.2;
+      if (s.control === 'FRIEND') {
+        ctx.fillStyle = '#0c0b08';
+        ctx.fillRect(-s2, -s2, s2 * 2, s2 * 2);
+      } else if (s.control === 'ENEMY') {
+        ctx.strokeStyle = 'rgba(110,104,92,0.95)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-s2, -s2, s2 * 2, s2 * 2);
+      } else {
+        ctx.strokeStyle = 'rgba(130,124,110,0.8)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(0, 0, s2, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // objectives
     for (const obj of game.objectives) {
       ctx.strokeStyle = obj.secured ? '#141210' : 'rgba(30,27,22,0.85)';
       ctx.lineWidth = 1;
       const s = 5;
       ctx.strokeRect(obj.pos.x * sx - s, obj.pos.y * sy - s, s * 2, s * 2);
+    }
+
+    // ink works — squares, filled by holder
+    for (const u of game.units) {
+      if (u.def.kind !== 'FACTORY') continue;
+      const x = u.x * sx;
+      const y = u.y * sy;
+      const s = 4;
+      if (u.dead) {
+        ctx.strokeStyle = 'rgba(20,17,12,0.8)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x - s, y - s);
+        ctx.lineTo(x + s, y + s);
+        ctx.moveTo(x + s, y - s);
+        ctx.lineTo(x - s, y + s);
+        ctx.stroke();
+      } else if (u.factoryCtl === 'FRIEND') {
+        ctx.fillStyle = '#0c0b08';
+        ctx.fillRect(x - s, y - s, s * 2, s * 2);
+      } else if (u.factoryCtl === 'NEUTRAL') {
+        ctx.strokeStyle = 'rgba(60,55,46,0.9)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - s, y - s, s * 2, s * 2);
+      } else {
+        ctx.fillStyle = 'rgba(110,104,92,0.95)';
+        ctx.fillRect(x - s, y - s, s * 2, s * 2);
+      }
     }
 
     // wrecks
@@ -513,6 +791,7 @@ export class Renderer {
       if (u.dead) continue;
       if (u.faction === 'FRIEND') {
         if (u.isAir && (u.airState === 'STANDBY' || u.airState === 'REARM')) continue;
+        if (u.def.kind === 'FACTORY') continue;
         ctx.fillStyle = '#0c0b08';
         if (u.isAir) {
           ctx.beginPath();
@@ -522,12 +801,13 @@ export class Renderer {
           ctx.closePath();
           ctx.fill();
         } else {
-          const s = u.def.kind === 'HQ' ? 4 : 2.5;
+          const s = 2.5;
           ctx.fillRect(u.x * sx - s / 2, u.y * sy - s / 2, s, s);
         }
       } else {
+        if (u.def.kind === 'FACTORY') continue;
         if (u.intel === 'DETECTED') {
-          const s = u.def.kind === 'HQ' ? 4 : 2.5;
+          const s = 2.5;
           ctx.fillStyle = '#6b655a';
           ctx.fillRect(u.x * sx - s / 2, u.y * sy - s / 2, s, s);
         } else if (u.intel === 'GHOST') {

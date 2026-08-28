@@ -4,11 +4,14 @@
 
 export type Faction = 'FRIEND' | 'ENEMY';
 
-export type UnitKind = 'MBT' | 'IFV' | 'SPG' | 'REC' | 'AIR' | 'SPAA' | 'HQ';
+export type UnitKind = 'MBT' | 'IFV' | 'SPG' | 'REC' | 'AIR' | 'SPAA' | 'HQ' | 'FACTORY';
 
 export type ProjectileKind = 'SHELL' | 'AUTO' | 'ARTY' | 'MISSILE_AIR' | 'MISSILE_GROUND' | 'MISSILE_SPAA';
 
 export type IntelState = 'HIDDEN' | 'GHOST' | 'DETECTED';
+
+/** who currently holds a strategic asset */
+export type Controller = 'NEUTRAL' | 'FRIEND' | 'ENEMY';
 
 export type UnitActivity =
   | 'HOLDING'
@@ -20,7 +23,8 @@ export type UnitActivity =
   | 'ATTACK RUN'
   | 'RTB'
   | 'REARMING'
-  | 'DESTROYED';
+  | 'DESTROYED'
+  | 'INBOUND';
 
 export type OrderType = 'MOVE' | 'ATTACK' | 'ATTACK_MOVE' | 'STOP' | 'HOLD' | 'FIRE_MISSION' | 'PATROL';
 
@@ -43,11 +47,29 @@ export interface ObjectiveState {
   primary: boolean;
 }
 
+/** a named piece of ground that generates ink while held */
+export interface Sector {
+  id: string;
+  name: string;
+  pos: { x: number; y: number };
+  radius: number;
+  /** ink per second while controlled */
+  income: number;
+  control: Controller;
+  /** seconds of uncontested presence needed to flip control */
+  captureTime: number;
+  /** internal capture progress timer (signed by capturing side) */
+  captureT: number;
+  capturing: Controller | null;
+  /** true if the sector grants nothing while an enemy factory stands in it */
+  hasFactory?: boolean;
+}
+
 export interface LogEntry {
   id: number;
   time: number;
   text: string;
-  level: 'info' | 'contact' | 'alert' | 'objective';
+  level: 'info' | 'contact' | 'alert' | 'objective' | 'economy';
 }
 
 export interface HudObjective {
@@ -67,6 +89,30 @@ export interface HudUnitLine {
   ammo: number;
   ammoMax: number;
   selected: boolean;
+}
+
+/** one purchasable formation in the deployment roster */
+export interface BattalionDef {
+  id: string;
+  name: string;
+  /** e.g. "3× MBT + 1× REC" */
+  composition: string;
+  /** short glyph row for the button */
+  kinds: string[];
+  cost: number;
+  buildTime: number;
+  desc: string;
+  air?: boolean;
+  /** the actual force package (engine-side) */
+  units: { type: string; n: number }[];
+}
+
+export interface HudProductionLine {
+  id: number;
+  battalionId: string;
+  name: string;
+  progress: number; // 0..1
+  remaining: number; // seconds
 }
 
 export interface HudSnapshot {
@@ -95,6 +141,27 @@ export interface HudSnapshot {
     roundsFired: number;
     missionTime: number;
   };
+  // ── ink economy ──────────────────────────────────────────
+  ink: number;
+  income: number;
+  incomeBase: number;
+  incomeSectors: number;
+  incomeFactories: number;
+  sectorsHeld: number;
+  sectorsTotal: number;
+  battalions: (BattalionDef & { available: boolean })[];
+  production: HudProductionLine[];
+  factories: {
+    id: string;
+    name: string;
+    control: Controller;
+    hp: number;
+    hpMax: number;
+    alive: boolean;
+    capturing: Controller | null;
+    captureProgress: number;
+  }[];
+  enemyStrength: number;
 }
 
 export interface AfterActionReport {
@@ -105,4 +172,9 @@ export interface AfterActionReport {
   roundsFired: number;
   objectivesSecured: number;
   objectivesTotal: number;
+  inkEarned: number;
+  inkSpent: number;
+  battalionsDeployed: number;
+  factoriesHeld: number;
+  factoriesTotal: number;
 }

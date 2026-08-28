@@ -1,13 +1,17 @@
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · vision & intelligence
-// Symmetric spotting with forest concealment, movement cues and
-// muzzle-flash revelation. Enemy units persist as fading ghosts.
+// Symmetric spotting with forest concealment, movement cues,
+// muzzle-flash revelation — and real terrain: ridgelines block
+// sight, high ground sees further, valleys hide.
 // ─────────────────────────────────────────────────────────────
 
 import type { Unit, SimContext } from '../entities/units';
 import { dist, clamp } from '../core/math';
 
 const GHOST_TIME = 32;
+/** eye height of a ground vehicle above local terrain (m) */
+const EYE_GROUND = 4.5;
+const EYE_TARGET = 3.2;
 
 export class VisionSystem {
   timer = 0;
@@ -33,11 +37,12 @@ export class VisionSystem {
 
     for (const observer of units) {
       if (observer.dead) continue;
+      const obH = observer.isAir ? 999 : ctx.terrain.heightAt(observer.x, observer.y);
       for (const target of units) {
         if (target.dead || target.faction === observer.faction) continue;
         const d = dist(observer.x, observer.y, target.x, target.y);
-        const r = this.spotRange(observer, target, ctx);
-        if (d < r) {
+        const r = this.spotRange(observer, target, ctx, obH);
+        if (d < r && this.terrainLOS(observer, target, ctx, obH)) {
           observer.visibleTargets.push(target);
         }
       }
@@ -50,8 +55,16 @@ export class VisionSystem {
         if (e.dead) e.intel = 'HIDDEN';
         continue;
       }
+      // large static structures are known landmarks — no fog for them
+      if (e.def.kind === 'FACTORY') {
+        e.intel = 'DETECTED';
+        e.lastSeen = now;
+        e.knownX = e.x;
+        e.knownY = e.y;
+        continue;
+      }
       const seen = units.some(
-        (f) => f.faction === 'FRIEND' && !f.dead && (f.isAir || !f.dead) && f.visibleTargets.includes(e)
+        (f) => f.faction === 'FRIEND' && !f.dead && f.visibleTargets.includes(e)
       );
       if (seen) {
         if (e.intel !== 'DETECTED' && now - e.lastSeen > 8) {
@@ -85,10 +98,34 @@ export class VisionSystem {
     }
   }
 
-  private spotRange(observer: Unit, target: Unit, ctx: SimContext): number {
+  /** ridgelines interrupt observation; aircraft look down on everything */
+  private terrainLOS(observer: Unit, target: Unit, ctx: SimContext, obH: number): boolean {
+    if (observer.isAir || target.isAir) return true;
+    if (target.def.kind === 'FACTORY') {
+      // big structures break the skyline — visible if in range
+      return true;
+    }
+    const tgH = ctx.terrain.heightAt(target.x, target.y);
+    return ctx.terrain.losClear(
+      observer.x,
+      observer.y,
+      obH + EYE_GROUND,
+      target.x,
+      target.y,
+      tgH + EYE_TARGET
+    );
+  }
+
+  private spotRange(observer: Unit, target: Unit, ctx: SimContext, obH: number): number {
     let r = observer.def.vision;
     if (target.isAir) {
       return r * 1.15 + 250;
+    }
+    // high ground sees further — up to ±30% by relative elevation
+    if (!observer.isAir) {
+      const tgH = ctx.terrain.heightAt(target.x, target.y);
+      const adv = clamp((obH - tgH) * 0.011, -0.3, 0.32);
+      r *= 1 + adv;
     }
     const forest = ctx.terrain.forestDensity(target.x, target.y);
     if (forest > 0.42) {
@@ -128,6 +165,8 @@ function labelFor(u: Unit): string {
       return 'AIR DEFENSE';
     case 'HQ':
       return 'COMMAND';
+    case 'FACTORY':
+      return 'INK WORKS';
     default:
       return 'UNIT';
   }

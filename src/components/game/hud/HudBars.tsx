@@ -2,11 +2,12 @@
 
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · HUD bars
-// Top: operation status. Bottom: minimap, formation, air, comms.
+// Top: operation status + ink ledger. Bottom: minimap, formation,
+// deployment, unit detail, air ops, comms.
 // ─────────────────────────────────────────────────────────────
 
 import type { RefObject } from 'react';
-import type { HudSnapshot, LogEntry } from '@/game/core/types';
+import type { HudSnapshot, LogEntry, BattalionDef } from '@/game/core/types';
 import type { Game } from '@/game/Game';
 import { fmtClock } from '@/game/Game';
 
@@ -20,6 +21,10 @@ interface TopBarProps {
 }
 
 export function TopBar({ hud, soundOn, onToggleSound, onHelp, onSpeed, onPause }: TopBarProps) {
+  const ink = hud?.ink ?? 0;
+  const income = hud?.income ?? 0;
+  const sectorsHeld = hud?.sectorsHeld ?? 0;
+  const sectorsTotal = hud?.sectorsTotal ?? 7;
   return (
     <div className="absolute top-0 inset-x-0 h-10 bg-[#12110e] border-b border-[#36322a] flex items-stretch">
       {/* wordmark */}
@@ -33,6 +38,26 @@ export function TopBar({ hud, soundOn, onToggleSound, onHelp, onSpeed, onPause }
         <span className="font-mono text-[11px] text-[#d9d6cc]">T+{fmtClock(hud?.missionTime ?? 0)}</span>
         <span className="font-mono text-[9px] tracking-[0.18em] text-[#5d584d]">
           {hud?.result === 'VICTORY' ? 'COMPLETE' : hud?.result === 'DEFEAT' ? 'FAILED' : hud?.paused ? 'PAUSED' : 'EXECUTING'}
+        </span>
+      </div>
+
+      {/* the ink ledger */}
+      <div className="flex items-center gap-3 px-4 border-r border-[#242119]">
+        <div className="flex items-center gap-1.5">
+          <span className="ps-ink-mark" aria-hidden />
+          <span className="font-mono text-[13px] font-semibold text-[#f3f1ea] tabular-nums" title="INK — your authority to sustain the operation">
+            {ink}
+          </span>
+          <span className="font-mono text-[8px] tracking-[0.2em] text-[#5d584d] pt-[3px]">INK</span>
+        </div>
+        <span className="font-mono text-[10px] text-[#8d887b] tabular-nums" title="base + sectors + ink works">
+          +{income.toFixed(1)}/S
+        </span>
+        <span
+          className="font-mono text-[9px] tracking-[0.12em] px-2 py-[3px] border text-[#d9d6cc] border-[#36322a]"
+          title="sectors held"
+        >
+          GROUND {sectorsHeld}/{sectorsTotal}
         </span>
       </div>
 
@@ -50,6 +75,9 @@ export function TopBar({ hud, soundOn, onToggleSound, onHelp, onSpeed, onPause }
             {o.name} — {o.status}
           </div>
         ))}
+        <span className="font-mono text-[9px] tracking-[0.12em] text-[#5d584d] ml-auto pr-1" title="enemy combat units alive">
+          OPFOR {hud?.enemyStrength ?? 0}
+        </span>
       </div>
 
       {/* sim controls */}
@@ -103,7 +131,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
   return (
     <div className="absolute bottom-0 inset-x-0 h-[150px] bg-[#12110e] border-t border-[#36322a] flex items-stretch gap-0">
       {/* minimap */}
-      <div className="ps-panel border-t-0 border-l-0 border-b-0 border-r w-[224px] flex flex-col">
+      <div className="ps-panel border-t-0 border-l-0 border-b-0 border-r w-[210px] flex flex-col">
         <div className="ps-header">
           <span>MAP · 1:10 000</span>
           <span className="text-[#8d887b]">3368-IV</span>
@@ -111,8 +139,8 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
         <div className="relative flex-1 p-2">
           <canvas
             ref={minimapRef}
-            width={208}
-            height={116}
+            width={194}
+            height={112}
             className="cursor-crosshair"
             onMouseDown={onMinimapClick}
           />
@@ -121,7 +149,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* selection / formation */}
-      <div className="ps-panel ps-selection-panel border-t-0 border-b-0 border-r w-[420px] flex flex-col">
+      <div className="ps-panel ps-selection-panel border-t-0 border-b-0 border-r w-[330px] flex flex-col">
         <div className="ps-header">
           <span>FORMATION</span>
           <span>{hud?.selectionCount ? `${hud.selectionCount} UNIT(S)` : 'NO SELECTION'}</span>
@@ -133,7 +161,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
             disabled={!hud?.selectionCount}
             onClick={() => gameRef.current?.input.commandAttackMove()}
           >
-            A · ATTACK-MOVE
+            A · ATK
           </button>
           <button
             className="ps-btn"
@@ -154,9 +182,18 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
             disabled={!hud?.selectionLines.some((l) => l.kind === 'SPG')}
             onClick={() => gameRef.current?.input.commandFireMission()}
           >
-            F · FIRE MISSION
+            F · FIRE
           </button>
         </div>
+      </div>
+
+      {/* deployment — the ink becomes force */}
+      <div className="ps-panel border-t-0 border-b-0 border-r w-[318px] flex flex-col">
+        <div className="ps-header">
+          <span>DEPLOY · ASSEMBLY ALPHA</span>
+          <span className="text-[#8d887b]">{hud?.ink ?? 0} INK</span>
+        </div>
+        <DeployBody hud={hud} gameRef={gameRef} />
       </div>
 
       {/* unit detail */}
@@ -169,7 +206,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* air operations */}
-      <div className="ps-panel ps-air-panel border-t-0 border-b-0 border-r w-[228px] flex flex-col">
+      <div className="ps-panel ps-air-panel border-t-0 border-b-0 border-r w-[196px] flex flex-col">
         <div className="ps-header">
           <span>AIR OPS</span>
           <span>CAS</span>
@@ -210,7 +247,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
                     if (u) g.input.launchAircraft(u.id, { x: g.camera.x, y: g.camera.y });
                   }}
                 >
-                  LAUNCH ON STATION
+                  LAUNCH
                 </button>
               )}
             </div>
@@ -220,7 +257,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* comms log */}
-      <div className="ps-panel ps-log-panel border-t-0 border-b-0 border-l-0 w-[300px] flex flex-col">
+      <div className="ps-panel ps-log-panel border-t-0 border-b-0 border-l-0 w-[280px] flex flex-col">
         <div className="ps-header">
           <span>COMMS · TRAFFIC</span>
           <span>REC</span>
@@ -235,13 +272,77 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
   );
 }
 
+// ── deployment panel ──────────────────────────────────────────
+
+function DeployBody({ hud, gameRef }: { hud: HudSnapshot | null; gameRef: RefObject<Game | null> }) {
+  const battalions = hud?.battalions ?? [];
+  const production = hud?.production ?? [];
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="grid grid-cols-2 gap-1 p-1.5">
+        {battalions.map((b) => (
+          <DeployButton key={b.id} b={b} gameRef={gameRef} ink={hud?.ink ?? 0} />
+        ))}
+      </div>
+      <div className="mt-auto border-t border-[#242119] px-2 py-1.5 flex flex-col gap-1 min-h-[46px]">
+        {production.length === 0 ? (
+          <span className="font-mono text-[8.5px] text-[#5d584d] tracking-[0.14em]">
+            NO FORMATIONS IN PRODUCTION
+          </span>
+        ) : (
+          production.map((p) => (
+            <div key={p.id} className="flex items-center gap-2">
+              <span className="font-mono text-[8.5px] text-[#d9d6cc] w-[120px] truncate">{p.name}</span>
+              <div className="ps-bar flex-1" style={{ height: 4 }}>
+                <i style={{ width: `${Math.round(p.progress * 100)}%` }} />
+              </div>
+              <span className="font-mono text-[8.5px] text-[#8d887b] w-[34px] text-right tabular-nums">
+                {Math.ceil(p.remaining)}s
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DeployButton({ b, gameRef, ink }: { b: BattalionDef & { available: boolean }; gameRef: RefObject<Game | null>; ink: number }) {
+  const affordable = b.available;
+  return (
+    <button
+      className={`ps-deploy-btn ${affordable ? '' : 'ps-deploy-off'}`}
+      onClick={() => gameRef.current?.queueBattalion(b.id)}
+      title={b.desc}
+      disabled={!affordable}
+    >
+      <span className="font-mono text-[9px] tracking-[0.06em] text-[#d9d6cc] truncate">{b.name}</span>
+      <span className="flex items-center gap-1.5 mt-[3px]">
+        <span className="flex gap-[2px]">
+          {b.kinds.slice(0, 4).map((k, i) => (
+            <span key={i} className="ps-kind-chip" data-k={k}>
+              {k}
+            </span>
+          ))}
+        </span>
+        <span
+          className={`font-mono text-[9.5px] ml-auto tabular-nums ${ink >= b.cost ? 'text-[#f3f1ea]' : 'text-[#6b655a'}`}
+        >
+          {b.cost}
+        </span>
+      </span>
+    </button>
+  );
+}
+
 function LogLine({ entry }: { entry: LogEntry }) {
-  const strong = entry.level === 'contact' || entry.level === 'alert' || entry.level === 'objective';
+  const strong =
+    entry.level === 'contact' || entry.level === 'alert' || entry.level === 'objective' || entry.level === 'economy';
   return (
     <div
       className={`ps-logline flex gap-2 px-1 py-[2px] font-mono text-[9px] leading-[1.35] ${
         entry.level === 'alert' ? 'border-l-2 border-[#f3f1ea] bg-[#191713]' : ''
-      }`}
+      } ${entry.level === 'economy' ? 'border-l-2 border-[#8d887b]' : ''}`}
     >
       <span className="text-[#5d584d] shrink-0">{fmtClock(entry.time)}</span>
       <span className={strong ? 'text-[#f3f1ea]' : 'text-[#8d887b]'}>{entry.text}</span>
@@ -256,7 +357,10 @@ function SelectionBody({ hud }: { hud: HudSnapshot | null }) {
         <p className="font-mono text-[9px] leading-relaxed text-[#5d584d]">
           LMB — SELECT · DRAG — BOX SELECT
           <br />RMB — MOVE / ATTACK / PATROL
-          <br />SCOUTS FORWARD. THE ENEMY IS SOMEWHERE ON THE SHEET.
+          <br />
+          GROUND PAYS INK. WORKS PAY MORE.
+          <br />
+          ZAVOD 3 IS UNCLAIMED — TAKE IT.
         </p>
       </div>
     );
@@ -265,7 +369,7 @@ function SelectionBody({ hud }: { hud: HudSnapshot | null }) {
   return (
     <div className="flex-1 overflow-y-auto ps-scroll p-1.5 flex flex-col gap-[2px]">
       {lines.map((l) => (
-        <div key={l.callsign} className="grid grid-cols-[74px_38px_1fr_54px_54px] items-center gap-1 px-1 h-[19px]">
+        <div key={l.callsign} className="grid grid-cols-[70px_34px_1fr_50px_50px] items-center gap-1 px-1 h-[19px]">
           <span className="font-mono text-[9.5px] text-[#d9d6cc] truncate">{l.callsign}</span>
           <span className="font-mono text-[8px] text-[#5d584d]">{l.kind}</span>
           <span className="font-mono text-[8px] text-[#8d887b] truncate">{l.activity}</span>
@@ -300,7 +404,7 @@ function DetailBody({ hud }: { hud: HudSnapshot | null }) {
   ];
   return (
     <div className="flex-1 min-h-0 flex">
-      <div className="w-[210px] border-r border-[#242119] p-2 flex flex-col gap-1">
+      <div className="w-[190px] border-r border-[#242119] p-2 flex flex-col gap-1">
         <span className="font-mono text-[11px] text-[#f3f1ea]">{d.callsign}</span>
         <span className="font-mono text-[8.5px] text-[#8d887b] leading-snug">{d.typeName}</span>
         <div className="mt-auto flex flex-col gap-1">

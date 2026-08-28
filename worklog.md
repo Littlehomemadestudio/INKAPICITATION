@@ -35,3 +35,34 @@ Stage Summary:
 - Verified flows: briefing→deploy, recon/contacts, artillery fire missions, combined-arms assault, CAS sorties with SAM threat, ink explosions/smoke/wrecks/craters, strategic→close zoom LOD, victory/defeat + AAR + replay on new seed.
 - Performance: ~58 fps worst case (software-rendered headless); no console/page errors; lint & tsc clean.
 - Art-direction screenshots archived in `/home/z/my-project/download/shots/`.
+
+---
+Task ID: 2
+Agent: Super Z (main agent)
+Task: V1 ITERATION — realistic dense battlefield + full INK economy (Part I + Part II of user's iteration spec).
+
+Work Log:
+- PART I — world density & believability (`world/terrain.ts` rewrite):
+  - Hand-composed relief: elongated ZAPAD RIDGE (4-crest spine), Hill 214 + SW shoulder, Hill 163 knoll, southern rises, NE plateau, widened river valley + dry tributary streambed.
+  - Deliberate infrastructure: MSR + HWY 14 + north track + south lane + ford track (all leading somewhere); 3 road bridges (village, north, east) + scenic rail-only bridge; full railway (west edge → ZAVOD 7 → east) with embankment/sleepers/twin rails.
+  - Settlements: NOVY MOST town strung along both roads w/ church landmark; 6 farmsteads (house+barn+shed+silo); bridge checkpoint; expanded HQ compound (3 masts, substation).
+  - 3 ink works sites (MOLot 9 / ZAVOD 3 / ZAVOD 7): saw-tooth production halls, chimney, tank farm, depot, substation — road+rail connected.
+  - Power corridor: lattice pylons + sagging catenary cables ZAVOD 7 → HQ.
+  - FORD wading point (passable water, cost 3.6), rocks as slope-clustered boulder fields (~140), treelines planted along field edges, retuned forestDensity curve (avg ~1950 trees across seeds), spot heights + 16 map labels.
+  - Height grid (32 m) + `losClear()` beam tracing for tactical elevation.
+- PART I — rendering (`render/terrainRender.ts` rewrite): cliff darkening + rock-speckle wash, railway/rail-bridge/ford/dry-stream/rocks/pylons+cables/new building kinds (CHURCH, SILO, CHIMNEY, STORAGE_TANK, DEPOT, SUBSTATION, CHECKPOINT, FACTORY halls), viewport culling for roads/river/railway/buildings/labels (visibleMask + strokePolyView), cached grain pattern, cheaper tree LOD (shadow blob only zoom>1.1).
+- PART II — ink economy (NEW `systems/economy.ts`):
+  - InkEconomy: base income always (FRIEND +2.2/s, ENEMY +2.6/s); 7 named sectors (presence-capture w/ progress + decay, 1.4–2.6 ink/s); factories +5/s each (halved under 40% HP); kill bounties (MBT 46 … REC 22, enemy earns 0.7×).
+  - Production queues (max 3): RECON 80 / ARTY 150 / MECH 230 / ARMOR 280 / AIR 130 with 22–45 s muster; reinforcements spawn at SW entry and march to ASSEMBLY ALPHA (never mid-combat); enemy battalions arrive at HQ rally, unit-capped 22, AI purchase guard vs cap + needs-based (arty/AD/recon).
+  - Factory Units (kind FACTORY, hp 520): capture by sole presence 7 s (faction flips, +5/s), destruction = massive asymmetric eruption + 8 scheduled secondary blasts over 5.5 s + triple scorch + rubble field + 12-min smoke column; chimney steam while alive, dark smoke when damaged.
+- PART II — systems: `units.ts` factory entity behavior (no auto-target, explicit attack only, reinforcement inbound flag); `vision.ts` terrain LOS via height grid + ±32% elevation vision bonus, factories always detected; `ai.ts` economy purchases + factory-threat response (converging defenders); `scenario.ts` new force ratios, 7 sectors, 3 factories (ZAVOD 3 neutral), briefing INK & GROUND section; `Game.ts` economy wiring, bounties, defeat = annihilated with nothing inbound, queueBattalion API, AAR economy stats (ink earned/spent, battalions, works held).
+- PART II — HUD: top-bar ink ledger (drop mark + reserve + income/s + GROUND n/7 + OPFOR count); bottom-bar DEPLOY panel (battalion buttons w/ cost + kind chips + production progress rows); comms economy entries; briefing/help/AAR economy sections; renderer sector overlays (dashed boundaries, owner marks, capture arcs, income labels), factory control overlays (perimeter, pennant, designation plate, capture arc, soot), assembly marker, minimap sector diamonds + factory squares; unitDraw FACTORY skip; globals.css ps-deploy-btn/ps-ink-mark/ps-kind-chip.
+- Verification (agent-browser + VLM, 6 art reviews): briefing ✓; strategic map "9/10 — far from an empty game board" ✓; town/factory/railway/pylon composition ✓; ZAVOD 3 capture verified (income 4→9/s) ✓; MECH company arrival at assembly ✓; enemy reinforcement + cap guard ✓; factory destruction choreography "dramatic and permanent" ✓; battle scene readable under ink ✓; AAR economy stats render ✓; redeploy resets economy ✓; LOS: hill crest sees HQ (+32%) while base is blocked ✓.
+- Performance: fixed a tree-batching regression (giant merged paths rasterize 18× slower in SwiftShader — reverted to per-tree fills); 60 FPS strategic / 40 FPS mid-zoom in software-rendered headless (render-only 60 FPS, sim <0.2 ms/step); tsc + eslint clean, no console errors.
+- Seed audit script `scripts/seed-audit.ts`: trees 1163–2650 (avg 1951), rocks 119–170, fields 87–103 across 8 seeds.
+
+Stage Summary:
+- Deliverable: PAPER STORM V1.1 "THE INK WAR" at `/` — same monochrome ink identity, now on a composed, physically believable landscape with a full strategic economy.
+- Core loop now visible end-to-end: base ink → scout → capture ground & ink works → deploy battalions at assembly → fight for sectors → bounties → expand → destroy KRAKEN HQ.
+- Key files: `src/game/systems/economy.ts` (new), `world/terrain.ts` + `render/terrainRender.ts` (rewritten), `Game.ts`, `units.ts`, `vision.ts`, `ai.ts`, `scenario.ts`, `renderer.ts`, `entities/effects.ts`, HUD (`HudBars.tsx`, `Overlays.tsx`, `globals.css`).
+- Art screenshots archived in `/home/z/my-project/download/shots/v11-*.png`.

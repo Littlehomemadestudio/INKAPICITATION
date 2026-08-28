@@ -1,21 +1,25 @@
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · scenario
-// OPERATION CROSSWIND — a single combined-arms deliberate attack
+// OPERATION CROSSWIND — a combined-arms fight for ground, ink
+// works, and the enemy command post. The map itself pays.
 // ─────────────────────────────────────────────────────────────
 
 import { Unit } from '../entities/units';
 import type { UnitType } from '../entities/unitDefs';
-import type { ObjectiveState } from '../core/types';
+import type { ObjectiveState, Sector } from '../core/types';
 import type { Vec2 } from '../core/math';
+import type { Terrain } from './terrain';
 
 export interface ScenarioData {
   units: Unit[];
   objectives: ObjectiveState[];
+  sectors: Sector[];
   anchors: Record<string, Vec2>;
   playerStaging: Vec2;
+  startInk: { FRIEND: number; ENEMY: number };
 }
 
-export function buildScenario(seed: number): ScenarioData {
+export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
   const units: Unit[] = [];
   const add = (type: UnitType, faction: 'FRIEND' | 'ENEMY', x: number, y: number, callsign: string, angle: number, defend?: Vec2) => {
     const u = new Unit(type, faction, x, y, callsign, seed);
@@ -32,14 +36,11 @@ export function buildScenario(seed: number): ScenarioData {
   add('M1A2', 'FRIEND', 620, 2430, 'SABRE 1-1', -0.55);
   add('M1A2', 'FRIEND', 545, 2510, 'SABRE 1-2', -0.55);
   add('M1A2', 'FRIEND', 640, 2600, 'SABRE 1-3', -0.55);
-  add('M1A2', 'FRIEND', 555, 2685, 'SABRE 1-4', -0.55);
   add('M2A3', 'FRIEND', 420, 2460, 'RAIDER 1', -0.55);
   add('M2A3', 'FRIEND', 360, 2560, 'RAIDER 2', -0.55);
-  add('M2A3', 'FRIEND', 430, 2660, 'RAIDER 3', -0.55);
   add('M109A7', 'FRIEND', 250, 2600, 'HAMMER 1', -0.55);
   add('M109A7', 'FRIEND', 300, 2700, 'HAMMER 2', -0.55);
   add('A10C', 'FRIEND', 200, 3200, 'TALON 1', -0.9);
-  add('A10C', 'FRIEND', 260, 3260, 'TALON 2', -0.9);
 
   // ── PL ECHO — crossroads village ───────────────────────────
   const ECHO: Vec2 = { x: 2190, y: 1850 };
@@ -67,6 +68,37 @@ export function buildScenario(seed: number): ScenarioData {
   add('T90M', 'ENEMY', 3530, 715, 'RES 1', Math.PI * 0.9, { x: 3530, y: 715 });
   add('T90M', 'ENEMY', 3610, 770, 'RES 2', Math.PI * 0.9, { x: 3610, y: 770 });
   add('BMP3', 'ENEMY', 3480, 790, 'RES 3', Math.PI * 0.9, { x: 3480, y: 790 });
+
+  // ── ink works — the economic objectives ────────────────────
+  for (const site of terrain.factories) {
+    const neutral = site.id === 'ZAVOD3';
+    const f = new Unit('FACTORY', 'ENEMY', site.x, site.y, site.name, seed);
+    f.angle = 0;
+    f.factoryId = site.id;
+    f.factoryCtl = neutral ? 'NEUTRAL' : 'ENEMY';
+    f.intel = 'DETECTED';
+    units.push(f);
+    if (site.id === 'MOLOT9') {
+      add('T90M', 'ENEMY', site.x - 150, site.y + 90, 'MOLOT 1', Math.PI * 0.8, { x: site.x - 150, y: site.y + 90 });
+      add('BMP3', 'ENEMY', site.x + 130, site.y + 120, 'MOLOT 2', Math.PI * 0.75, { x: site.x + 130, y: site.y + 120 });
+    }
+    if (site.id === 'ZAVOD7') {
+      add('BMP3', 'ENEMY', site.x - 170, site.y + 60, 'ZAVOD 1', Math.PI * 0.6, { x: site.x - 170, y: site.y + 60 });
+      add('BTR82A', 'ENEMY', site.x + 150, site.y - 80, 'ZAVOD 2', Math.PI * 0.55, { x: site.x + 150, y: site.y - 80 });
+      add('TOR', 'ENEMY', site.x + 60, site.y + 170, 'AD 4', Math.PI * 0.6, { x: site.x + 60, y: site.y + 170 });
+    }
+  }
+
+  // ── the ground itself pays — strategic sectors ─────────────
+  const sectors: Sector[] = [
+    { id: 'TOWN', name: 'NOVY MOST', pos: { x: 2190, y: 1850 }, radius: 380, income: 2.0, control: 'ENEMY', captureTime: 9, captureT: 0, capturing: null },
+    { id: 'HILL', name: 'HILL 214', pos: { x: 2950, y: 1180 }, radius: 340, income: 2.6, control: 'ENEMY', captureTime: 9, captureT: 0, capturing: null },
+    { id: 'RIDGE', name: 'ZAPAD RIDGE', pos: { x: 820, y: 740 }, radius: 380, income: 1.6, control: 'NEUTRAL', captureTime: 9, captureT: 0, capturing: null },
+    { id: 'NBRIDGE', name: 'NORTH BRIDGE', pos: { x: 1240, y: 1400 }, radius: 260, income: 1.4, control: 'ENEMY', captureTime: 8, captureT: 0, capturing: null },
+    { id: 'EBRIDGE', name: 'EAST BRIDGE', pos: { x: 2352, y: 1812 }, radius: 280, income: 1.6, control: 'ENEMY', captureTime: 8, captureT: 0, capturing: null },
+    { id: 'FARMS', name: 'SOUTH FARMS', pos: { x: 1900, y: 2650 }, radius: 420, income: 1.8, control: 'FRIEND', captureTime: 9, captureT: 0, capturing: null },
+    { id: 'PLATEAU', name: 'KRAKEN PLATEAU', pos: { x: 3440, y: 640 }, radius: 420, income: 2.2, control: 'ENEMY', captureTime: 10, captureT: 0, capturing: null },
+  ];
 
   const objectives: ObjectiveState[] = [
     {
@@ -98,8 +130,10 @@ export function buildScenario(seed: number): ScenarioData {
   return {
     units,
     objectives,
+    sectors,
     anchors: { ECHO, FOXTROT, HQ: HQA },
     playerStaging: { x: 620, y: 2520 },
+    startInk: { FRIEND: 260, ENEMY: 340 },
   };
 }
 
@@ -107,22 +141,32 @@ export const BRIEFING = {
   operation: 'OPERATION CROSSWIND',
   sheet: 'SHEET 3368-IV · SERIES Z4E · 1:10 000',
   situation: [
-    'KRAKEN GROUP holds prepared defences across the river line. Their forward platoon (PL ECHO) holds the crossroads at NOVY MOST; a reinforced platoon (PL FOXTROT) occupies HILL 214 with short-range air defence. Their command post is dug in at the north-eastern compound, screened by two air defence systems and a pair of self-propelled guns.',
-    'The enemy is expected to hold in depth and to commit his armour reserve once the forward positions break. His artillery will engage any force it can observe — move dispersed, use the tree lines, and keep your reconnaissance forward.',
+    'KRAKEN GROUP holds prepared defences across the river line. Their forward platoon (PL ECHO) holds the crossroads at NOVY MOST; a reinforced platoon (PL FOXTROT) occupies HILL 214 with short-range air defence. Their command post is dug in on the north-eastern plateau, screened by air defence systems and self-propelled guns.',
+    'Three ink works feed their operation: MOLot 9 on the northern rail line, ZAVOD 3 in the southern farm belt (abandoned — unclaimed), and the ZAVOD 7 combine on the eastern highway. The works are hardened but not invulnerable. They can be captured — or destroyed.',
+    'Your authority to sustain this fight is INK. It flows in a thin trickle from corps, faster from every sector you clear, and heavily from any works you hold. Destroyed enemy formations also yield ink. Spend it to raise battalions at the staging area.',
   ],
   mission:
-    'TASK FORCE SABRE will breach the river line, destroy the enemy defences in sector, and neutralise the KRAKEN command post. You command all friendly forces on the sheet.',
+    'TASK FORCE SABRE will cross the river, take the ground that pays, and neutralise the KRAKEN command post. Every bridge, hill and works you hold widens your margin of superiority.',
   execution: [
-    'PHASE 1 — Reconnoitre. Push SCOUT sections across the northern ford or along the MSR. Locate the enemy without committing the armour.',
-    'PHASE 2 — Soften. Task HAMMER (self-propelled artillery) against identified positions. Enemy guns reveal themselves when they fire — counter-battery them.',
-    'PHASE 3 — Break. Cross at the bridge or the ford, fix the defenders, and destroy them with armour and mechanised infantry. TALON (attack aircraft) is available on call — watch for enemy air defence.',
+    'PHASE 1 — Reconnoitre. Push SCOUT sections across the northern bridge or along the MSR. High ground sees further; ridgelines hide what is behind them.',
+    'PHASE 2 — Economise. Occupy ZAVOD 3 to open your first ink line. Clear NOVY MOST and the crossings. Task HAMMER against identified positions.',
+    'PHASE 3 — Break. Fix the defenders, destroy them with armour and mechanised infantry, and push for the plateau. TALON is available on call — watch for enemy air defence.',
+    'END STATE — KRAKEN HQ destroyed. The works you hold decide how expensive the victory was.',
   ],
   forces: [
-    ['SABRE 1-1 … 1-4', 'M1A2 SEPv3 — main battle tank'],
-    ['RAIDER 1 … 3', 'M2A3 Bradley — infantry fighting vehicle'],
+    ['SABRE 1-1 … 1-3', 'M1A2 SEPv3 — main battle tank'],
+    ['RAIDER 1 … 2', 'M2A3 Bradley — infantry fighting vehicle'],
     ['HAMMER 1 … 2', 'M109A7 Paladin — self-propelled 155 mm'],
     ['SCOUT 1 … 2', 'M1127 Stryker — reconnaissance'],
-    ['TALON 1 … 2', 'A-10C Thunderbolt II — attack aircraft'],
+    ['TALON 1', 'A-10C Thunderbolt II — attack aircraft'],
+    ['DEPLOY PANEL', 'raise further battalions with INK'],
+  ],
+  economy: [
+    ['BASE INCOME', '+2.2 ink/s — always, even at your lowest'],
+    ['SECTORS', 'held ground pays +1.4 to +2.6 ink/s each'],
+    ['INK WORKS', 'captured works pay +5 ink/s — or burn'],
+    ['KILL BOUNTIES', 'destroyed enemy units pay their worth in ink'],
+    ['DEPLOYMENT', 'battalions arrive at ASSEMBLY ALPHA, SW corner'],
   ],
   controls: [
     ['LMB / DRAG', 'select unit · box-select units'],
