@@ -310,83 +310,136 @@
   border-color: #5d584d;
 }
 
-/* ── responsive command architecture ──────────────────────────
-   The instrument adapts; the battlefield never shrinks.
-   Tested at 1366×768 · 1440×900 · 1920×1080.                */
+/* ── the command deck — instruments dock, they never scroll ──
+   ONE grid: MAP · FORMATION · DEPLOY · DETAIL · AIR.
+   Comms traffic rides the battlefield itself (top-left).
+   Verified 1366×768 · 1440×900 · 1920×1080 — every control
+   on screen, nothing clipped, nothing scrolled.            */
 
-/* horizontal scroll safety net for the bottom bar */
-.ps-scroll-x {
-  scrollbar-width: thin;
-}
-.ps-scroll-x::-webkit-scrollbar {
-  height: 4px;
-}
-.ps-scroll-x::-webkit-scrollbar-track {
-  background: transparent;
-}
-.ps-scroll-x::-webkit-scrollbar-thumb {
-  background: #3a352c;
+.ps-bottombar {
+  border-top: 1px solid var(--ps-line);
 }
 
-/* panel widths — one source of truth, three breakpoints */
-.ps-panel-map    { width: var(--ps-w-map); }
-.ps-panel-form   { width: var(--ps-w-form); }
-.ps-panel-deploy { width: var(--ps-w-deploy); }
-.ps-panel-air    { width: var(--ps-w-air); }
-.ps-panel-log    { width: var(--ps-w-log); }
+.ps-deck {
+  height: var(--ps-h-bottom);
+  display: grid;
+  grid-template-columns:
+    var(--ps-w-map)
+    minmax(232px, 1fr)
+    minmax(294px, 1.08fr)
+    minmax(296px, 1.18fr)
+    var(--ps-w-air);
+  overflow: hidden;
+}
+
+/* deck panels share hairline separators — no outer chrome */
+.ps-deck .ps-panel {
+  border: 0;
+  min-width: 0;
+}
+.ps-deck .ps-panel + .ps-panel {
+  border-left: 1px solid var(--ps-line-soft);
+}
 
 :root {
-  --ps-w-map: 210px;
-  --ps-w-form: 330px;
-  --ps-w-deploy: 318px;
-  --ps-w-air: 196px;
-  --ps-w-log: 280px;
+  --ps-h-bottom: 168px;
+  --ps-w-map: 208px;
+  --ps-w-air: 192px;
 }
 
-/* ≤1500px — compact instruments, everything still readable */
-@media (max-width: 1500px) {
+/* generous decks get roomier fixed rails */
+@media (min-width: 1700px) {
   :root {
-    --ps-w-map: 184px;
-    --ps-w-form: 300px;
-    --ps-w-deploy: 292px;
-    --ps-w-air: 182px;
-    --ps-w-log: 230px;
+    --ps-w-map: 224px;
+    --ps-w-air: 204px;
   }
-  .ps-subtle { display: none; }
-  .ps-top-cell { padding-left: 0.6rem; padding-right: 0.6rem; }
 }
 
-/* ≤1380px — secondary info collapses first (comms traffic) */
-@media (max-width: 1380px) {
+/* ≤1240px — unit detail folds away (its essentials already live
+   in the formation rows); everything functional stays docked */
+@media (max-width: 1240px) {
   :root {
-    --ps-w-map: 176px;
-    --ps-w-form: 286px;
-    --ps-w-deploy: 282px;
-    --ps-w-air: 176px;
+    --ps-w-map: 196px;
+    --ps-w-air: 184px;
   }
-  .ps-log-panel { display: none; }
-  /* objective chips: primary only, rest summarised */
-  .ps-obj-extra { display: none; }
-  .ps-controls { gap: 0.25rem; }
-  .ps-controls .ps-btn { padding: 3px 6px; }
+  .ps-deck {
+    grid-template-columns:
+      var(--ps-w-map)
+      minmax(232px, 1fr)
+      minmax(294px, 1.12fr)
+      var(--ps-w-air);
+  }
+  .ps-panel-detail {
+    display: none;
+  }
 }
 
-/* ≤1180px — air ops folds into the log's slot */
-@media (max-width: 1180px) {
-  :root {
-    --ps-w-map: 170px;
-    --ps-w-form: 272px;
-    --ps-w-deploy: 272px;
+/* ≤940px — formation rows collapse to a digest; ORDERS STAY */
+@media (max-width: 940px) {
+  .ps-sel-rows {
+    display: none;
   }
-  .ps-air-panel { display: none; }
-}
-
-/* legacy narrow-viewport graceful degradation */
-@media (max-width: 1000px) {
-  .ps-selection-panel { display: none; }
 }
 
 /* short viewports: the sheet, not the chrome, keeps priority */
-@media (max-height: 800px) {
-  .ps-detail-left { width: 168px; }
+@media (max-height: 760px) {
+  :root {
+    --ps-h-bottom: 148px;
+  }
+  .ps-detail-left {
+    width: 156px;
+  }
+}
+
+/* top strip hygiene — chips may truncate, controls never move */
+.ps-topbar {
+  overflow: hidden;
+}
+.ps-obj-chip {
+  flex-shrink: 0;
+}
+@media (max-width: 1500px) {
+  .ps-subtle {
+    display: none;
+  }
+}
+@media (max-width: 1380px) {
+  .ps-obj-extra {
+    display: none;
+  }
+}
+
+/* order buttons — the primary actuator, one clean footprint */
+.ps-orders .ps-btn {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
+  padding: 0 4px;
+}
+
+/* deployment grid — columns flow from the space the deck gives */
+.ps-deploy-grid {
+  grid-template-columns: repeat(auto-fill, minmax(146px, 1fr));
+}
+
+/* comms traffic — a staff feed pinned to the map itself */
+.ps-comms-line {
+  background: rgba(18, 17, 14, 0.82);
+  border-left: 2px solid #36322a;
+  padding: 2px 8px 2px 6px;
+}
+.ps-comms-line[data-level='alert'] {
+  border-left-color: var(--ps-paper);
+  background: rgba(25, 23, 19, 0.92);
+}
+.ps-comms-line[data-level='economy'] {
+  border-left-color: var(--ps-dim);
+}
+.ps-comms-line[data-level='objective'] {
+  border-left-color: var(--ps-txt);
+}
+.ps-comms-line[data-level='contact'] {
+  border-left-color: var(--ps-txt);
 }

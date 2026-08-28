@@ -241,8 +241,22 @@ export class ProjectileSystem {
       switch (p.kind) {
         case 'SHELL':
         case 'AUTO': {
+          const px0 = p.x;
+          const py0 = p.y;
           p.x += p.vx * dt;
           p.y += p.vy * dt;
+          // mass in the flight path — rounds slam into buildings,
+          // boulders and wrecks instead of ghosting through them
+          if (ctx.obstacles) {
+            const hit = ctx.obstacles.firstHit(px0, py0, p.x, p.y);
+            if (hit) {
+              p.x = hit.x;
+              p.y = hit.y;
+              this.impact(p, ctx);
+              this.list.splice(i, 1);
+              break;
+            }
+          }
           if (dist(p.x, p.y, p.aimX, p.aimY) < 10) {
             this.impact(p, ctx);
             this.list.splice(i, 1);
@@ -282,8 +296,22 @@ export class ProjectileSystem {
           const speed = 205 + p.t * 30;
           p.vx = Math.cos(p.angle) * speed;
           p.vy = Math.sin(p.angle) * speed;
+          const mx0 = p.x;
+          const my0 = p.y;
           p.x += p.vx * dt;
           p.y += p.vy * dt;
+          // a missile that flies into a building dies against the
+          // building — cover means something against air power too
+          if (p.kind === 'MISSILE_AIR' && ctx.obstacles) {
+            const hit = ctx.obstacles.firstHit(mx0, my0, p.x, p.y);
+            if (hit) {
+              p.x = hit.x;
+              p.y = hit.y;
+              this.impact(p, ctx);
+              this.list.splice(i, 1);
+              break;
+            }
+          }
           if (p.kind === 'MISSILE_SPAA') {
             p.z += p.vz * dt;
             p.vz -= 30 * dt;

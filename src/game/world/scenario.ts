@@ -178,4 +178,10 @@ export const BRIEFING = {
     ['SPACE / 1 2 3', 'pause · simulation speed'],
     ['ESC', 'deselect · cancel order mode'],
   ],
+  // rendered beside the controls block in the briefing
+  hudNotes: [
+    'COMMS — traffic feeds onto the map, top-left; the bottom deck is instruments only',
+    'RINGS — selecting a unit draws its sight (faint) and gun range (hard) on the ground',
+    'COVER — a bracketed arc marks the sheltered side of a covered vehicle',
+  ],
 };

@@ -121,6 +121,15 @@ export function BriefingOverlay({
               </div>
             ))}
           </div>
+          {b.hudNotes?.length ? (
+            <div className="col-start-2 mt-4 border-l-2 border-[#17150f] pl-4">
+              {b.hudNotes.map((n) => (
+                <p key={n} className="font-mono text-[9.5px] tracking-[0.08em] text-[#6b6557] leading-[1.9]">
+                  {n}
+                </p>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <hr className="ps-rule mb-8" />

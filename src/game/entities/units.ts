@@ -250,6 +250,14 @@ export class Unit {
 
     this.updateRoleBehavior(dt, ctx);
     this.updateGroundMovement(dt, ctx);
+    // the world is solid EVERY frame — not just while driving. A
+    // wreck dropped on a holding unit, a collapsed wall, a boulder
+    // pocket: arriving somewhere is no licence to intersect matter.
+    if (ctx.obstacles && this.def.kind !== 'HQ') {
+      const hit = ctx.obstacles.resolve(this, dt, ctx);
+      if (hit.slow < 1) this.speedNow *= hit.slow;
+      if (hit.crushed) this.suppression = Math.min(1, this.suppression + 0.02);
+    }
     this.updateTargeting(dt, ctx);
     this.updateFiring(dt, ctx);
     this.updateSurfaceFx(dt, ctx);
@@ -501,14 +509,6 @@ export class Unit {
         this.x += Math.cos(a) * push;
         this.y += Math.sin(a) * push;
       }
-    }
-
-    // the world is solid: rocks, walls, buildings, felled steel.
-    // tracked armour ploughs through timber and dry stone — visibly.
-    if (ctx.obstacles) {
-      const hit = ctx.obstacles.resolve(this, dt, ctx);
-      if (hit.slow < 1) this.speedNow *= hit.slow;
-      if (hit.crushed) this.suppression = Math.min(1, this.suppression + 0.02);
     }
 
     // stuck detection: nudge sideways

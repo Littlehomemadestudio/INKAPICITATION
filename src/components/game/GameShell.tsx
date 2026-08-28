@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Game } from '@/game/Game';
 import type { AfterActionReport, HudSnapshot } from '@/game/core/types';
-import { TopBar, BottomBar } from './hud/HudBars';
+import { TopBar, BottomBar, CommsFeed, CursorModeChip } from './hud/HudBars';
 import { BriefingOverlay, EndOverlay, HelpOverlay } from './hud/Overlays';
 
 export default function GameShell() {
@@ -112,7 +112,7 @@ export default function GameShell() {
 
       {/* frame lines */}
       <div className="pointer-events-none absolute inset-x-0 top-10 h-px bg-[#36322a]" />
-      <div className="pointer-events-none absolute inset-x-0 bottom-[150px] h-px bg-[#36322a]" />
+      <div className="pointer-events-none absolute inset-x-0 h-px bg-[#36322a]" style={{ bottom: 'var(--ps-h-bottom)' }} />
 
       <TopBar
         hud={hud}
@@ -123,7 +123,11 @@ export default function GameShell() {
         onPause={() => gameRef.current?.setPaused(!gameRef.current?.paused)}
       />
 
-      <BottomBar hud={hud} minimapRef={minimapRef} gameRef={gameRef} onLogHover={() => {}} />
+      <BottomBar hud={hud} minimapRef={minimapRef} gameRef={gameRef} />
+
+      {/* comms traffic rides the battlefield itself */}
+      <CommsFeed hud={hud} />
+      <CursorModeChip hud={hud} />
 
       {/* paused veil */}
       {hud?.paused && !result && !briefingOpen && (

@@ -587,6 +587,27 @@ export class Renderer {
           }
           ctx.restore();
         }
+        // the tactical envelope — what this vehicle can SEE (faint
+        // ring) and REACH with its gun (hard ring). The tactics are
+        // laid on the terrain itself: stand here and this is your
+        // world; move there and the rings tell you what changes.
+        if (!u.isAir) {
+          const visR = u.def.vision * (1 - 0.3 * u.suppression);
+          ctx.strokeStyle = 'rgba(20,18,16,0.16)';
+          ctx.setLineDash([12 / zoom, 10 / zoom]);
+          ctx.lineWidth = Math.max(1, 1 / zoom);
+          ctx.beginPath();
+          ctx.arc(gx, gy, visR, 0, Math.PI * 2);
+          ctx.stroke();
+          if (u.def.range > 40) {
+            ctx.strokeStyle = 'rgba(20,18,16,0.38)';
+            ctx.setLineDash([16 / zoom, 8 / zoom]);
+            ctx.beginPath();
+            ctx.arc(gx, gy, u.def.range, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+        }
         // command path
         if (u.dest) {
           ctx.strokeStyle = 'rgba(20,17,12,0.5)';

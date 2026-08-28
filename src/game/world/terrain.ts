@@ -557,15 +557,21 @@ export class Terrain {
       if (this.roadFactor(x, y) > 0.05 || this.railFactor(x, y) > 0.1) continue;
       if (this.buildingAt(x, y, 30)) continue;
       if (rng.chance(0.3)) {
-        // a small boulder cluster, not a lone pebble
+        // a small boulder cluster, not a lone pebble — stones
+        // never interpenetrate; the gaps between them are real
+        const rockFits = (rx: number, ry: number, rr: number) => {
+          for (const rk of this.rocks) {
+            if (dist(rk.x, rk.y, rx, ry) < rk.r + rr + 2.2) return false;
+          }
+          return true;
+        };
         const nRocks = rng.int(1, 3);
         for (let r = 0; r < nRocks; r++) {
-          this.rocks.push({
-            x: x + rng.range(-9, 9),
-            y: y + rng.range(-9, 9),
-            r: rng.range(1.8, 5.2),
-            seed: rng.next(),
-          });
+          const rx = x + rng.range(-11, 11);
+          const ry = y + rng.range(-11, 11);
+          const rr = rng.range(1.8, 5.2);
+          if (!rockFits(rx, ry, rr)) continue;
+          this.rocks.push({ x: rx, y: ry, r: rr, seed: rng.next() });
         }
       }
       if (this.rocks.length > 170) break;
@@ -797,6 +803,29 @@ export class Terrain {
 
   // ── settlement builders ────────────────────────────────────
 
+  /** true if a w×h footprint at (x,y,rot) keeps `margin` m clear of every standing building */
+  private buildingFits(x: number, y: number, w: number, h: number, rot: number, margin = 4): boolean {
+    const reach = Math.hypot(w, h) / 2;
+    for (const b of this.buildings) {
+      const br = Math.hypot(b.w, b.h) / 2;
+      if (Math.abs(b.x - x) > reach + br + margin || Math.abs(b.y - y) > reach + br + margin) continue;
+      // rotated-box SAT — minimum separation across the four axes
+      const ca1 = Math.cos(rot), sa1 = Math.sin(rot);
+      const ca2 = Math.cos(b.rot), sa2 = Math.sin(b.rot);
+      const dx = b.x - x, dy = b.y - y;
+      const axes: Array<[number, number]> = [[ca1, sa1], [-sa1, ca1], [ca2, sa2], [-sa2, ca2]];
+      let minSep = Infinity;
+      for (const [ux, uy] of axes) {
+        const dist = dx * ux + dy * uy;
+        const rA = (w / 2) * Math.abs(ca1 * ux + sa1 * uy) + (h / 2) * Math.abs(-sa1 * ux + ca1 * uy);
+        const rB = (b.w / 2) * Math.abs(ca2 * ux + sa2 * uy) + (b.h / 2) * Math.abs(-sa2 * ux + ca2 * uy);
+        minSep = Math.min(minSep, rA + rB - Math.abs(dist));
+      }
+      if (minSep > -margin) return false;
+    }
+    return true;
+  }
+
   private buildTown(cx: number, cy: number, rng: RNG) {
     // buildings string along both roads — a real crossroads town
     const along = (
@@ -806,22 +835,24 @@ export class Terrain {
       side: number,
       kinds: BuildingKind[]
     ) => {
+      const span = 210; // metres of road frontage the lots share
       for (let i = 0; i < n; i++) {
         const t = (i + 1) / (n + 1);
-        const bx = cx + dx * (t - 0.5) * 2 + -dy * side * rng.range(52, 74);
-        const by = cy + dy * (t - 0.5) * 2 + dx * side * rng.range(52, 74);
-        if (this.isWater(bx, by) || this.roadFactor(bx, by) > 0.1) continue;
         const kind = kinds[i % kinds.length];
-        const w = kind === 'BARN' ? rng.range(26, 34) : rng.range(15, 22);
-        const h = kind === 'BARN' ? rng.range(14, 18) : rng.range(11, 15);
-        this.buildings.push({
-          x: bx,
-          y: by,
-          w,
-          h,
-          rot: Math.atan2(dy, dx) + rng.range(-0.12, 0.12),
-          kind,
-        });
+        const w = kind === 'BARN' ? rng.range(26, 32) : rng.range(15, 22);
+        const h = kind === 'BARN' ? rng.range(14, 17) : rng.range(11, 15);
+        // try a few setbacks — a lot that doesn't fit is left empty
+        let placed = false;
+        for (let attempt = 0; attempt < 3 && !placed; attempt++) {
+          const set = 52 + attempt * 16 + rng.range(-6, 6);
+          const bx = cx + dx * (t - 0.5) * span + -dy * side * set;
+          const by = cy + dy * (t - 0.5) * span + dx * side * set;
+          if (this.isWater(bx, by) || this.roadFactor(bx, by) > 0.1) continue;
+          const rot = Math.atan2(dy, dx) + rng.range(-0.12, 0.12);
+          if (!this.buildingFits(bx, by, w, h, rot)) continue;
+          this.buildings.push({ x: bx, y: by, w, h, rot, kind });
+          placed = true;
+        }
       }
     };
     along(1, -0.36, 4, 1, ['HOUSE', 'HOUSE', 'BARN', 'HOUSE']); // along MSR north
@@ -831,7 +862,9 @@ export class Terrain {
     along(0.94, 0.34, 3, 1, ['HOUSE', 'HOUSE', 'BARN']); // along HWY east
     along(0.94, 0.34, 2, -1, ['SHED', 'HOUSE']);
     // church — the town landmark, near the bridge
-    this.buildings.push({ x: 2236, y: 1782, w: 13, h: 22, rot: 0.28, kind: 'CHURCH' });
+    if (this.buildingFits(2236, 1782, 13, 22, 0.28)) {
+      this.buildings.push({ x: 2236, y: 1782, w: 13, h: 22, rot: 0.28, kind: 'CHURCH' });
+    }
   }
 
   private buildFarm(cx: number, cy: number, rng: RNG) {
@@ -851,18 +884,13 @@ export class Terrain {
       else if (kind === 'SILO') { w = rng.range(8, 10); h = rng.range(8, 10); }
       else if (kind === 'SHED') { w = rng.range(12, 16); h = rng.range(9, 12); }
       else { w = rng.range(15, 20); h = rng.range(11, 14); }
-      this.buildings.push({
-        x: bx,
-        y: by,
-        w,
-        h,
-        rot: rng.range(-0.25, 0.25) + (rng.chance(0.5) ? 0 : Math.PI / 2),
-        kind,
-      });
+      const rot = rng.range(-0.25, 0.25) + (rng.chance(0.5) ? 0 : Math.PI / 2);
+      if (!this.buildingFits(bx, by, w, h, rot)) continue;
+      this.buildings.push({ x: bx, y: by, w, h, rot, kind });
     }
   }
 
-  /** an ink works: halls, chimney, tank farm, depot — scaled by significance */
+/** an ink works: halls, chimney, tank farm, depot — scaled by significance */
   private buildFactory(site: FactorySite, rng: RNG, scale: number) {
     const { x, y } = site;
     // main production hall
