@@ -160,6 +160,7 @@ export class Game {
     this.log(`OPERATION CROSSWIND — TASK FORCE SABRE DEPLOYED`, 'objective');
     this.log(`BASE INK 260 · SECTORS AND WORKS PAY — READ THE DEPLOY PANEL`, 'economy');
     this.log(`ZAVOD 3 LIES ABANDONED SOUTH OF THE RIVER — OCCUPY IT`, 'info');
+    this.log(`VELIKIY BAY PAYS INK — HULLS ARRIVE FROM THE APPROACHES, SE`, 'info');
   }
 
   restart(newSeed?: number) {
@@ -259,6 +260,7 @@ export class Game {
 
     this.input.update(dt);
     this.camera.update(dt);
+    this.audio.music?.update(dt);
 
     if (this.running && !this.paused && !this.result) {
       const steps = this.speed;
@@ -339,6 +341,25 @@ export class Game {
       }
     }
 
+    // ship engines — the deep heartbeat of the big hulls
+    for (const u of this.units) {
+      if (!u.isShip) continue;
+      const underWay = !u.dead && !u.sinking;
+      if (underWay && u.def.length >= 60) {
+        this.audio.startShipEngine(u.id, u.x, u.y, u.def.length);
+        this.audio.updateEngine(u.id, u.x, u.y, u.speedNow > 0.5);
+      } else {
+        this.audio.stopEngine(u.id);
+      }
+    }
+
+    // the score reads the theatre: fire, fleets, and the BIG BOI
+    this.updateMusic();
+
+    // the ocean swells when the listener nears open water
+    const camShore = this.terrain.shoreDistAt(this.camera.x, this.camera.y);
+    this.audio.setOceanProximity(clamp(1 - Math.max(0, -camShore) / 1000, 0, 1));
+
     this.stats.roundsFired = this.projectiles.fired;
 
     // HQ damage smoke
@@ -416,6 +437,46 @@ export class Game {
     this.result = result;
     this.resultAt = this.time;
     this.log(result === 'VICTORY' ? 'ENEMY HQ DESTROYED — MISSION ACCOMPLISHED' : 'TASK FORCE DESTROYED — MISSION FAILED', 'objective');
+    this.audio.music?.stinger(result === 'VICTORY' ? 'victory' : 'defeat');
+  }
+
+  // ── the score ── the music must know what the battle is doing ──
+
+  private prevBB = 0;
+  private fleetContactCooldown = 0;
+
+  private updateMusic() {
+    const m = this.audio.music;
+    if (!m) return;
+
+    // a capital ship joining the fleet is the biggest event on the sheet
+    const bb = this.units.filter((u) => u.faction === 'FRIEND' && u.isShip && u.def.length > 200 && !u.dead && !u.sinking).length;
+    if (bb > this.prevBB) {
+      m.stinger('capital');
+      this.log(`THE BIG BOI IS ON THE SHEET — ${this.units.find((u) => u.faction === 'FRIEND' && u.def.length > 200 && !u.dead)?.callsign} MAKING FOR THE ANCHORAGE`, 'objective');
+    }
+    this.prevBB = bb;
+
+    // first sight of an enemy hull — the score tenses
+    this.fleetContactCooldown -= 0.016;
+    const hullSighted = this.units.some((u) => u.isShip && u.faction === 'ENEMY' && u.intel === 'DETECTED' && !u.dead);
+    if (hullSighted && this.fleetContactCooldown <= 0) {
+      this.fleetContactCooldown = 90;
+      m.stinger('contact');
+    }
+
+    // intensity from the fire picture
+    let heat = 0;
+    let firing = 0;
+    for (const u of this.units) {
+      if (u.dead) continue;
+      if (this.time - u.lastFireT < 5) firing++;
+      if (u.target && !u.target.dead && !u.isAir) heat += 0.34;
+      if (u.isShip && u.target && !u.target.dead) heat += 0.6;
+    }
+    heat += Math.min(1.6, firing * 0.18);
+    if (bb > 0) heat += 0.7;
+    m.setIntensity(heat);
   }
 
   buildAAR(): AfterActionReport {
@@ -462,7 +523,7 @@ export class Game {
     // cover state of the detailed unit — against its last attacker,
     // else the nearest known contact
     let coverLabel = 'EXPOSED';
-    if (detailUnit && !detailUnit.isAir) {
+    if (detailUnit && !detailUnit.isAir && !detailUnit.isShip) {
       let tx = 0;
       let ty = 0;
       let td = Infinity;
@@ -522,21 +583,40 @@ export class Game {
                 : detailUnit.def.projectile === 'SHELL'
                   ? '120 mm AP'
                   : detailUnit.def.projectile === 'AUTO'
-                    ? '25 mm AUTOCANNON'
+                    ? detailUnit.def.type === 'PATROL'
+                      ? '25 mm + 2× TORPEDO'
+                      : '25 mm AUTOCANNON'
                     : detailUnit.def.projectile === 'MISSILE_AIR'
                       ? 'AGM-114 × 6'
-                      : 'SAM',
+                      : detailUnit.def.type === 'BATTLESHIP'
+                        ? '9× 380 mm MAIN BATTERY'
+                        : detailUnit.def.type === 'CRUISER'
+                          ? '2×2 152 mm + SSM'
+                          : detailUnit.def.type === 'DESTROYER'
+                            ? '130 mm + 8 SSM'
+                            : detailUnit.def.type === 'FRIGATE'
+                              ? '76 mm + SAM'
+                              : 'SAM',
             range: detailUnit.def.range,
             speedKph: Math.round(detailUnit.def.speed * 3.6),
             vision: detailUnit.def.vision,
-            armor: detailUnit.def.kind === 'MBT' ? 'HEAVY' : detailUnit.def.kind === 'IFV' ? 'MEDIUM' : 'LIGHT',
+            armor:
+              detailUnit.isShip
+                ? detailUnit.def.length > 200
+                  ? 'CAPITAL HULL'
+                  : 'NAVAL HULL'
+                : detailUnit.def.kind === 'MBT'
+                  ? 'HEAVY'
+                  : detailUnit.def.kind === 'IFV'
+                    ? 'MEDIUM'
+                    : 'LIGHT',
             suppression: Math.round(detailUnit.suppression * 100),
-            cover: coverLabel,
+            cover: detailUnit.isShip ? 'OPEN WATER' : coverLabel,
           }
         : null,
       log: this.logEntries.slice(0, 8),
       air: this.units
-        .filter((u) => u.isAir)
+        .filter((u) => u.isAir && u.faction === 'FRIEND')
         .map((u) => ({
           callsign: u.callsign,
           state:
@@ -549,6 +629,18 @@ export class Game {
                   : u.airState,
           missiles: u.ammo,
           hp: Math.ceil(u.hp),
+        })),
+      navy: this.units
+        .filter((u) => u.isShip && u.faction === 'FRIEND')
+        .map((u) => ({
+          callsign: u.callsign,
+          cls: u.def.shortName,
+          state: u.dead ? 'LOST' : u.sinking ? 'SINKING' : u.getActivity(),
+          hp: Math.ceil(u.hp),
+          hpMax: u.def.hp,
+          guns: u.ammo,
+          ssm: u.mounts.filter((m) => m.def.kind === 'SSM').reduce((a, m) => a + m.ammo, 0),
+          torps: u.mounts.filter((m) => m.def.kind === 'TORP').reduce((a, m) => a + m.ammo, 0),
         })),
       cursorMode: this.input.cursorMode,
       result: this.result,

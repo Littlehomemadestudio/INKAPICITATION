@@ -23,6 +23,40 @@ export interface Wreck {
   turretToss: { x: number; y: number; angle: number } | null;
 }
 
+/** a sunk hull — the bay remembers what died there */
+export interface ShipWreck {
+  x: number;
+  y: number;
+  angle: number;
+  type: string;
+  faction: 'FRIEND' | 'ENEMY';
+  born: number;
+  smokeUntil: number;
+  listing: number;
+}
+
+interface WaterDroplet {
+  a: number;
+  d0: number;
+  d1: number;
+  size: number;
+  delay: number;
+}
+
+/** a shell finding the sea — column, spray, rings, contaminated foam */
+interface WaterSplash {
+  x: number;
+  y: number;
+  scale: number;
+  t: number;
+  life: number;
+  ink: boolean;
+  seed: number;
+  droplets: WaterDroplet[];
+  rings: number[];
+  mistDone: boolean;
+}
+
 interface InkBlob {
   a: number;
   d0: number;
@@ -167,6 +201,15 @@ export class EffectsSystem {
   smokeSprites: HTMLCanvasElement[] = [];
   dustSprite: HTMLCanvasElement | null = null;
 
+  /** the persistent wake layer — foam written by passing hulls */
+  wakeCanvas: HTMLCanvasElement;
+  private wakeCtx: CanvasRenderingContext2D;
+  private wakeFadeT = 0;
+
+  /** water columns + expanding rings */
+  waterSplashes: WaterSplash[] = [];
+  shipWrecks: ShipWreck[] = [];
+
   windAngle = -0.6;
   windSpeed = 5.5;
   time = 0;
@@ -183,6 +226,10 @@ export class EffectsSystem {
     this.scars.width = Math.round(terrainW * SCAR_SCALE);
     this.scars.height = Math.round(terrainH * SCAR_SCALE);
     this.scarCtx = this.scars.getContext('2d')!;
+    this.wakeCanvas = document.createElement('canvas');
+    this.wakeCanvas.width = Math.round(terrainW * SCAR_SCALE);
+    this.wakeCanvas.height = Math.round(terrainH * SCAR_SCALE);
+    this.wakeCtx = this.wakeCanvas.getContext('2d')!;
     for (let i = 0; i < 4; i++) this.smokeSprites.push(this.makeSmokeSprite(seed + i * 977));
   }
 
@@ -352,6 +399,119 @@ export class EffectsSystem {
   addWreck(w: Wreck) {
     this.wrecks.push(w);
     if (this.wrecks.length > 46) this.wrecks.shift();
+  }
+
+  addShipWreck(w: ShipWreck) {
+    this.shipWrecks.push(w);
+    if (this.shipWrecks.length > 22) this.shipWrecks.shift();
+  }
+
+  // ── water: the sea answers ordnance with columns of white ──
+
+  /** a shell hits the sea: vertical plume, spray, rings, mist.
+   *  scale 1 ≈ a 130 mm round; 3.9 ≈ the 380 mm main battery */
+  spawnWaterSplash(x: number, y: number, scale: number, ink: boolean) {
+    if (this.waterSplashes.length > 42) return;
+    const nDrop = Math.round(6 + scale * 7);
+    const droplets: WaterDroplet[] = [];
+    for (let i = 0; i < nDrop; i++) {
+      droplets.push({
+        a: this.rng.range(0, Math.PI * 2),
+        d0: scale * this.rng.range(2, 5),
+        d1: scale * this.rng.range(8, 24),
+        size: this.rng.range(0.5, 1.3) * (0.6 + scale * 0.4),
+        delay: this.rng.range(0.06, 0.3),
+      });
+    }
+    this.waterSplashes.push({
+      x,
+      y,
+      scale,
+      t: 0,
+      life: 1.5 + scale * 0.55,
+      ink,
+      seed: this.rng.next() * 100,
+      droplets,
+      rings: [0, 0.18, 0.42],
+      mistDone: false,
+    });
+    // heavy rounds shake the camera through the water
+    if (scale > 0.8) this.camera.addShake(x, y, Math.min(4.5, scale * 1.6));
+  }
+
+  /** foam written astern of a moving hull */
+  spawnWake(x: number, y: number, angle: number, beam: number, frac: number, length: number) {
+    const w = this.wakeCtx;
+    w.save();
+    w.translate(x * SCAR_SCALE, y * SCAR_SCALE);
+    w.rotate(angle);
+    // turbulent water directly astern — brighter when driving hard
+    const alpha = 0.05 + frac * 0.09;
+    w.strokeStyle = `rgba(238,240,238,${alpha})`;
+    w.lineWidth = Math.max(1.5, beam * frac * SCAR_SCALE);
+    w.lineCap = 'round';
+    w.beginPath();
+    w.moveTo(0, 0);
+    w.lineTo(Math.min(26, 6 + length * 0.09) * SCAR_SCALE, 0);
+    w.stroke();
+    // the spreading V fades outward — two soft angled strokes
+    w.strokeStyle = `rgba(238,240,238,${alpha * 0.55})`;
+    w.lineWidth = Math.max(1, beam * frac * 0.5 * SCAR_SCALE);
+    for (const side of [1, -1]) {
+      w.beginPath();
+      w.moveTo(0, 0);
+      w.lineTo(Math.min(40, 10 + length * 0.14) * SCAR_SCALE, side * (0.6 + length * 0.02) * SCAR_SCALE);
+      w.stroke();
+    }
+    w.restore();
+  }
+
+  /** bow wave — the white moustache of a hull with way on */
+  spawnBowWave(x: number, y: number, angle: number, beam: number, frac: number) {
+    const w = this.wakeCtx;
+    w.save();
+    w.translate(x * SCAR_SCALE, y * SCAR_SCALE);
+    w.rotate(angle);
+    w.strokeStyle = `rgba(240,242,240,${0.1 + frac * 0.1})`;
+    w.lineWidth = Math.max(1.2, beam * 0.4 * SCAR_SCALE);
+    w.lineCap = 'round';
+    for (const side of [1, -1]) {
+      w.beginPath();
+      w.moveTo(2 * SCAR_SCALE, side * beam * 0.2 * SCAR_SCALE);
+      w.lineTo((4 + frac * 10) * SCAR_SCALE, side * (beam * 0.28 + 3) * SCAR_SCALE);
+      w.stroke();
+    }
+    w.restore();
+  }
+
+  /** the seam of foam over a running torpedo */
+  spawnTorpedoWake(x: number, y: number) {
+    const w = this.wakeCtx;
+    w.fillStyle = 'rgba(238,240,238,0.24)';
+    w.beginPath();
+    w.arc(x * SCAR_SCALE, y * SCAR_SCALE, 1.3, 0, Math.PI * 2);
+    w.fill();
+  }
+
+  /** oil and ink staining the water where a hull died */
+  stampOilSlick(x: number, y: number, r: number) {
+    const ctx = this.scarCtx;
+    ctx.save();
+    ctx.translate(x * SCAR_SCALE, y * SCAR_SCALE);
+    ctx.scale(SCAR_SCALE, SCAR_SCALE);
+    for (let i = 0; i < 4; i++) {
+      const a = this.rng.range(0, Math.PI * 2);
+      const d = this.rng.range(0, r * 0.4);
+      const rr = r * this.rng.range(0.4, 0.8);
+      const g = ctx.createRadialGradient(Math.cos(a) * d, Math.sin(a) * d, 0, Math.cos(a) * d, Math.sin(a) * d, rr);
+      g.addColorStop(0, 'rgba(14,12,8,0.34)');
+      g.addColorStop(1, 'rgba(14,12,8,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(a) * d, Math.sin(a) * d, rr, rr * this.rng.range(0.5, 0.9), a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   addRubble(r: RubbleField) {
@@ -633,6 +793,53 @@ export class EffectsSystem {
         }
       }
     }
+
+    // ── water columns rise, hang, and fall ──
+    for (let i = this.waterSplashes.length - 1; i >= 0; i--) {
+      const s = this.waterSplashes[i];
+      s.t += dt;
+      if (!s.mistDone && s.t > 0.3) {
+        s.mistDone = true;
+        if (s.scale > 0.55) {
+          this.spawnSmoke(s.x + this.rng.range(-4, 4), s.y + this.rng.range(-4, 4), {
+            r: s.scale * 2.2,
+            r1: s.scale * 13,
+            life: 1.9,
+            alpha: 0.13,
+            vy: -3,
+          });
+        }
+      }
+      if (s.t > s.life) this.waterSplashes.splice(i, 1);
+    }
+
+    // the sea heals — wakes fade back into blue
+    this.wakeFadeT += dt;
+    if (this.wakeFadeT > 2.2) {
+      this.wakeFadeT = 0;
+      const w = this.wakeCtx;
+      w.save();
+      w.globalCompositeOperation = 'destination-out';
+      w.fillStyle = 'rgba(0,0,0,0.085)';
+      w.fillRect(0, 0, this.wakeCanvas.width, this.wakeCanvas.height);
+      w.restore();
+    }
+
+    // half-sunk hulls still burn
+    for (const sw of this.shipWrecks) {
+      if (this.time < sw.smokeUntil && this.smokes.length < 380) {
+        if (this.rng.chance(dt * 1.7)) {
+          this.spawnSmoke(sw.x + this.rng.range(-10, 10), sw.y + this.rng.range(-6, 6), {
+            r: 3,
+            r1: 16 + this.rng.range(0, 16),
+            life: 3.4,
+            alpha: 0.26,
+            vy: -4,
+            dark: 1.4,
+          });
+        }
+      }
+    }
   }
 
   // ── draw ───────────────────────────────────────────────────
@@ -816,6 +1023,135 @@ export class EffectsSystem {
       ctx.arc(0, 0, f.size * 1.1, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+    }
+  }
+
+  /** foam trails under the fleet — one image blit */
+  drawWakes(ctx: CanvasRenderingContext2D, cam: Camera) {
+    // only bother when the viewport touches the water
+    const t = this.terrainW;
+    void t;
+    if (cam.viewX + cam.viewW < 2100 && cam.viewY < 1900) return;
+    ctx.drawImage(this.wakeCanvas, 0, 0, this.terrainW, this.terrainH);
+  }
+
+  /** water columns — the vertical language of shells finding the sea */
+  drawWaterSplashes(ctx: CanvasRenderingContext2D, cam: Camera) {
+    const pad = 160;
+    for (const s of this.waterSplashes) {
+      if (s.x < cam.viewX - pad || s.x > cam.viewX + cam.viewW + pad) continue;
+      if (s.y < cam.viewY - pad || s.y > cam.viewY + cam.viewH + pad) continue;
+      const t = s.t;
+      const fade = clamp(1 - t / s.life, 0, 1);
+      const sc = s.scale;
+
+      // the hole in the sea — dark water at the base of the column
+      ctx.fillStyle = `rgba(38,46,52,${0.5 * fade})`;
+      ctx.beginPath();
+      ctx.ellipse(s.x, s.y, sc * 3.6, sc * 2.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // expanding rings across the surface — staggered, thick, white
+      for (let r = 0; r < s.rings.length; r++) {
+        const rt = t - s.rings[r];
+        if (rt <= 0 || rt > 1.8) continue;
+        const rr = sc * (4 + rt * 30);
+        const rk = 1 - rt / 1.8;
+        ctx.strokeStyle = `rgba(240,243,241,${0.55 * rk})`;
+        ctx.lineWidth = Math.max(1, sc * 0.9 * rk + 0.8);
+        ctx.beginPath();
+        ctx.ellipse(s.x, s.y, rr, rr * 0.7, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // base surge — white water thrown aside, widest early
+      const surgeR = sc * (4.5 + t * 8);
+      ctx.fillStyle = `rgba(243,245,243,${0.68 * fade})`;
+      ctx.beginPath();
+      ctx.ellipse(s.x, s.y, surgeR, surgeR * 0.66, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ── the column: rises fast, hangs, collapses ──
+      const hMax = sc * 30 + 12;
+      const riseT = 0.26;
+      let h: number;
+      if (t < riseT) h = hMax * (t / riseT);
+      else h = hMax * Math.max(0, 1 - (t - riseT) / (s.life * 0.7));
+      if (h > 2) {
+        const topY = s.y - h * 0.5;
+        const w0 = sc * 3.6 + 2;
+        const w1 = (sc * 2.4 + 1.6) * (0.4 + 0.6 * (h / hMax));
+        // rising motion streaks — speed lines under the crown
+        ctx.strokeStyle = `rgba(244,246,244,${0.35 * fade})`;
+        ctx.lineWidth = Math.max(0.8, sc * 0.4);
+        ctx.beginPath();
+        for (let i = 0; i < 4; i++) {
+          const ox = (i - 1.5) * w0 * 0.5;
+          ctx.moveTo(s.x + ox * 0.7, s.y - h * 0.16);
+          ctx.lineTo(s.x + ox, topY + h * 0.12);
+        }
+        ctx.stroke();
+        // column body — near-white, opaque at the heart
+        ctx.fillStyle = `rgba(246,248,246,${0.94 * fade})`;
+        ctx.beginPath();
+        ctx.moveTo(s.x - w0, s.y);
+        ctx.lineTo(s.x - w1, topY);
+        ctx.lineTo(s.x + w1, topY);
+        ctx.lineTo(s.x + w0, s.y);
+        ctx.closePath();
+        ctx.fill();
+        // the shadowed throat — only as the column ages and fouls
+        if (t > riseT + 0.12) {
+          const darkA = clamp((t - riseT - 0.12) * 2.2, 0, 1) * 0.5 * fade;
+          ctx.fillStyle = s.ink ? `rgba(24,22,16,${darkA})` : `rgba(64,72,78,${darkA * 0.8})`;
+          ctx.beginPath();
+          ctx.moveTo(s.x - w0 * 0.42, s.y);
+          ctx.lineTo(s.x - w1 * 0.36, topY + sc * 2);
+          ctx.lineTo(s.x + w1 * 0.36, topY + sc * 2);
+          ctx.lineTo(s.x + w0 * 0.42, s.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+        // crown — the sheaf at the top, spikes flung wide
+        if (t < s.life * 0.6) {
+          ctx.fillStyle = `rgba(250,251,250,${0.95 * fade})`;
+          for (let c = 0; c < 6; c++) {
+            const a = -Math.PI / 2 + (c - 2.5) * 0.46 + Math.sin(s.seed + c) * 0.15;
+            const len = sc * (4 + 7 * Math.abs(Math.sin(s.seed * 3 + c * 2.7)));
+            ctx.beginPath();
+            ctx.moveTo(s.x, topY);
+            ctx.lineTo(s.x + Math.cos(a - 0.22) * len, topY + Math.sin(a - 0.22) * len);
+            ctx.lineTo(s.x + Math.cos(a + 0.22) * len, topY + Math.sin(a + 0.22) * len);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+      }
+
+      // spray droplets — white, flung outward, drooping back
+      for (const d of s.droplets) {
+        const dt2 = t - d.delay;
+        if (dt2 <= 0 || dt2 > 0.85) continue;
+        const k = dt2 / 0.85;
+        const dist = d.d0 + (d.d1 - d.d0) * (1 - (1 - k) * (1 - k));
+        const droop = k * k * sc * 7;
+        const px = s.x + Math.cos(d.a) * dist;
+        const py = s.y + Math.sin(d.a) * dist * 0.72 + droop * 0.3;
+        ctx.fillStyle = `rgba(246,248,246,${0.85 * (1 - k)})`;
+        ctx.beginPath();
+        ctx.ellipse(px, py, d.size * 1.2, d.size * 0.8, d.a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // contaminated foam — ink spreads LATE, after the white violence
+      if (s.ink && t > s.life * 0.45) {
+        const ik = clamp((t - s.life * 0.45) / (s.life * 0.55), 0, 1);
+        ctx.fillStyle = `rgba(30,28,22,${0.3 * ik * fade + 0.08 * ik})`;
+        ctx.beginPath();
+        const fr = sc * (7 + t * 11);
+        ctx.ellipse(s.x, s.y, fr, fr * 0.62, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 

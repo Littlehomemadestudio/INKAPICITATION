@@ -14,6 +14,7 @@ import type { InkEconomy } from '../systems/economy';
 import type { ObstacleSystem } from '../systems/obstacles';
 import { coverFrom, findCoverSpot } from '../systems/cover';
 import { gridString } from '../core/math';
+import { createMountStates, MountState, mountWorld } from './shipDraw';
 
 export interface SimContext {
   units: Unit[];
@@ -117,6 +118,19 @@ export class Unit {
   lastFireT = -999;
   damageFlash = 0;
 
+  // ── naval state ──
+  mounts: MountState[] = [];
+  /** independent air-defence target (SAM/CIWS engage aircraft) */
+  airTarget: Unit | null = null;
+  /** shore bombardment point — an ordered target the guns walk onto */
+  navalAreaTarget: { x: number; y: number } | null = null;
+  sinking = false;
+  sinkT = 0;
+  sinkDuration = 8;
+  wakeT = 0;
+  burnT = 0;
+  private navalCheckT = 0;
+
   rng: RNG;
 
   constructor(type: UnitType, faction: Faction, x: number, y: number, callsign: string, seedBase: number) {
@@ -132,10 +146,23 @@ export class Unit {
     if (this.def.isAir) {
       this.airState = 'STANDBY';
     }
+    if (this.isShip) {
+      this.mounts = createMountStates(type);
+      this.sinkDuration = 4 + this.def.length / 22;
+      this.angle = this.rng.chance(0.5) ? -Math.PI * 0.4 : Math.PI * 0.35;
+    }
   }
 
   get isAir(): boolean {
     return this.def.isAir;
+  }
+
+  get isShip(): boolean {
+    return this.def.domain === 'SEA';
+  }
+
+  get draft(): number {
+    return this.def.draft ?? 40;
   }
 
   // ── orders ─────────────────────────────────────────────────
@@ -145,6 +172,11 @@ export class Unit {
     this.dest = { ...dest };
     this.fireMissionLeft = 0;
     this.fireMissionArea = null;
+    if (this.isShip) {
+      this.path = ctx.terrain.findSeaPath({ x: this.x, y: this.y }, dest, this.draft);
+      this.pathIndexStart();
+      return;
+    }
     this.path = ctx.terrain.findPath({ x: this.x, y: this.y }, dest);
     this.pathIndexStart();
   }
@@ -152,6 +184,11 @@ export class Unit {
   orderAttackMove(dest: Vec2, ctx: SimContext) {
     this.order = { type: 'ATTACK_MOVE', pos: dest };
     this.dest = { ...dest };
+    if (this.isShip) {
+      this.path = ctx.terrain.findSeaPath({ x: this.x, y: this.y }, dest, this.draft);
+      this.pathIndexStart();
+      return;
+    }
     this.path = ctx.terrain.findPath({ x: this.x, y: this.y }, dest);
     this.pathIndexStart();
   }
@@ -161,6 +198,14 @@ export class Unit {
     this.target = target;
     this.fireMissionLeft = 0;
     this.fireMissionArea = null;
+    if (this.isShip) {
+      // a ship fights at stand-off range — it closes only as far
+      // as its battery demands, then holds the band
+      const far = this.def.standoff?.[0] ?? this.def.range * 0.8;
+      const d = dist(this.x, this.y, target.x, target.y);
+      if (d > far) this.approachTarget(target, ctx);
+      return;
+    }
     if (!this.isAir && this.def.projectile !== 'ARTY') {
       // close to weapon range
       this.approachTarget(target, ctx);
@@ -202,6 +247,18 @@ export class Unit {
 
   private approachTarget(target: Unit, ctx: SimContext) {
     const d = dist(this.x, this.y, target.x, target.y);
+    if (this.isShip) {
+      const far = this.def.standoff?.[0] ?? this.def.range * 0.8;
+      if (d > far) {
+        const t = 1 - far / Math.max(d, 1);
+        const px = this.x + (target.x - this.x) * t;
+        const py = this.y + (target.y - this.y) * t;
+        this.path = ctx.terrain.findSeaPath({ x: this.x, y: this.y }, { x: px, y: py }, this.draft);
+        this.dest = { x: px, y: py };
+        this.pathIndexStart();
+      }
+      return;
+    }
     if (d > this.def.range * 0.85) {
       const t = 0.8;
       const px = this.x + (target.x - this.x) * t;
@@ -245,6 +302,11 @@ export class Unit {
 
     if (this.isAir) {
       this.updateAir(dt, ctx);
+      return;
+    }
+
+    if (this.isShip) {
+      this.updateNaval(dt, ctx);
       return;
     }
 
@@ -719,6 +781,425 @@ export class Unit {
     }
   }
 
+  // ── naval: a fleet behaves like a fleet ────────────────────
+
+  private updateNaval(dt: number, ctx: SimContext) {
+    this.damageFlash = Math.max(0, this.damageFlash - dt * 3);
+    // steel crews behind armour plate keep their nerve longer
+    this.suppression = Math.max(0, this.suppression - dt * 0.055);
+    this.navalCheckT -= dt;
+
+    if (this.sinking) {
+      this.updateSinking(dt, ctx);
+      return;
+    }
+
+    this.updateNavalTargeting(dt, ctx);
+    this.updateNavalMovement(dt, ctx);
+    this.updateNavalFiring(dt, ctx);
+    this.updateNavalFx(dt, ctx);
+  }
+
+  /** target discipline: main battery picks its fight, air defence minds the sky */
+  private updateNavalTargeting(dt: number, ctx: SimContext) {
+    void dt;
+    if (this.target && (this.target.dead || this.target.sinking || !this.sees(this.target))) {
+      this.target = null;
+    }
+    // shore fire: an ATTACK order against a known structure holds even
+    // without line of sight — naval gunfire is observed fire, and a
+    // works that big does not move
+    this.navalAreaTarget = null;
+    if (this.order.type === 'ATTACK' && this.order.targetId !== undefined) {
+      const ot = ctx.units.find((u) => u.id === this.order.targetId);
+      if (ot && !ot.dead && (!this.sees(ot) || ot.def.kind === 'FACTORY')) {
+        if (ot.def.kind === 'FACTORY' || ot.intel === 'DETECTED') {
+          this.navalAreaTarget = { x: ot.x, y: ot.y };
+        }
+      }
+    }
+    if (!this.target || this.target.dead) {
+      let best: Unit | null = null;
+      let bestScore = -Infinity;
+      for (const u of this.visibleTargets) {
+        if (u.dead || u.sinking || u.faction === this.faction) continue;
+        if (u.def.kind === 'FACTORY') continue; // shore works are engaged on order
+        if (u.isAir) continue;
+        const d = dist(this.x, this.y, u.x, u.y);
+        let s = 140 - d / 26;
+        // gunnery doctrine: warships fight warships first — the
+        // ship that duels escorts while a cruiser closes is lost
+        if (u.def.kind === 'NAVAL') s += 60 - u.def.length * 0.06;
+        if (u.def.kind === 'HQ') s -= 40;
+        if (s > bestScore) {
+          bestScore = s;
+          best = u;
+        }
+      }
+      if (best) this.target = best;
+    }
+    // air defence is a separate engagement — SAMs and CIWS track
+    // aircraft independently of the surface fight
+    if (this.airTarget && (this.airTarget.dead || !this.sees(this.airTarget))) {
+      this.airTarget = null;
+    }
+    if (!this.airTarget) {
+      let best: Unit | null = null;
+      let bd = Infinity;
+      for (const u of this.visibleTargets) {
+        if (u.dead || !u.isAir) continue;
+        const d = dist(this.x, this.y, u.x, u.y);
+        if (d < bd) {
+          bd = d;
+          best = u;
+        }
+      }
+      if (best) this.airTarget = best;
+    }
+
+    // stand-off doctrine: hold the gunnery band, don't brawl
+    if (this.navalCheckT <= 0 && this.target && !this.target.dead) {
+      this.navalCheckT = 2.6 + this.rng.range(0, 1.2);
+      const d = dist(this.x, this.y, this.target.x, this.target.y);
+      const far = this.def.standoff?.[0] ?? this.def.range * 0.8;
+      const near = this.def.standoff?.[1] ?? this.def.range * 0.4;
+      const busy = this.order.type === 'MOVE' || this.order.type === 'ATTACK_MOVE';
+      if (!busy) {
+        if (d > far * 1.12) {
+          this.approachTarget(this.target, ctx);
+        } else if (d < near) {
+          // too close — open the range on a withdrawal bearing
+          const away = angleOf(this.x - this.target.x, this.y - this.target.y);
+          const px = clamp(this.x + Math.cos(away) * 520, 60, ctx.terrain.W - 60);
+          const py = clamp(this.y + Math.sin(away) * 520, 60, ctx.terrain.H - 60);
+          this.path = ctx.terrain.findSeaPath({ x: this.x, y: this.y }, { x: px, y: py }, this.draft);
+          this.dest = { x: px, y: py };
+        } else if (this.path.length === 0) {
+          // in the band: present a stable gunnery platform — steer
+          // to keep the target on the broadside arc
+          const bearing = angleOf(this.target.x - this.x, this.target.y - this.y);
+          const want = bearing + Math.PI / 2 * (this.rng.chance(0.5) ? 1 : -1);
+          this.angle = rotateToward(this.angle, want, this.def.turnRate * dt * 0.5);
+        }
+      }
+    }
+  }
+
+  /** heavy hulls: inertia, rudder authority, and the shore is stone */
+  private updateNavalMovement(dt: number, ctx: SimContext) {
+    let speedTarget = 0;
+
+    if (this.path.length > 0) {
+      const wp = this.path[0];
+      const d = dist(this.x, this.y, wp.x, wp.y);
+      const arriveR = this.path.length === 1 ? 40 + this.def.length * 0.3 : 70 + this.def.length * 0.22;
+      if (d < arriveR) {
+        this.path.shift();
+        if (this.path.length === 0) {
+          this.dest = null;
+          this.isReinforcement = false;
+        }
+      } else {
+        let desired = angleOf(wp.x - this.x, wp.y - this.y);
+        desired = this.steerOffShoals(desired, ctx);
+        // mutual avoidance — small hulls give way to big ones
+        let slowForTraffic = false;
+        for (const o of ctx.units) {
+          if (o === this || o.dead || !o.isShip) continue;
+          const od = dist(this.x, this.y, o.x, o.y);
+          const minD = (this.def.length + o.def.length) * 0.5 + 55;
+          if (od < minD && od > 0.01) {
+            const rel = angleOf(o.x - this.x, o.y - this.y);
+            const side = angDiff(this.angle, rel) > 0 ? 1 : -1;
+            desired -= side * 0.5 * (1 - od / minD);
+            if (Math.abs(angDiff(this.angle, rel)) < 0.6) slowForTraffic = true;
+          }
+        }
+        const diff = angDiff(this.angle, desired);
+        // rudder needs way on: slow hulls barely turn
+        const wayOn = clamp(this.speedNow / Math.max(1, this.def.speed * 0.4), 0.25, 1);
+        this.angle = rotateToward(this.angle, desired, this.def.turnRate * wayOn * dt);
+        speedTarget = this.def.speed * (1 - clamp(Math.abs(diff) / Math.PI, 0, 1) * 0.55);
+        if (slowForTraffic) speedTarget *= 0.55;
+        if (this.suppression > 0.75) speedTarget *= 0.85;
+      }
+    } else if (this.order.type === 'ATTACK' && this.target && !this.target.dead) {
+      const d = dist(this.x, this.y, this.target.x, this.target.y);
+      const far = this.def.standoff?.[0] ?? this.def.range * 0.8;
+      if (d > far * 1.1) this.approachTarget(this.target, ctx);
+    }
+
+    // inertia — a warship is thousands of tonnes of steel
+    const accel = this.def.accel ?? 1;
+    this.speedNow += clamp(speedTarget - this.speedNow, -accel * 1.6 * dt, accel * dt);
+    if (this.speedNow < 0.05 && speedTarget === 0) this.speedNow = 0;
+
+    const nx = this.x + Math.cos(this.angle) * this.speedNow * dt;
+    const ny = this.y + Math.sin(this.angle) * this.speedNow * dt;
+    // hard grounding guard — never drive the bow onto the land
+    const clearance = ctx.terrain.shoreDistAt(nx, ny);
+    if (clearance > this.draft * 0.55 || this.speedNow < 0.2) {
+      this.x = clamp(nx, 30, ctx.terrain.W - 30);
+      this.y = clamp(ny, 30, ctx.terrain.H - 30);
+    } else {
+      this.speedNow *= 0.55;
+    }
+
+    // a becalmed hull with orders is a stuck hull — re-route
+    if (this.path.length > 0 && this.speedNow < 0.35) {
+      this.stuckT += dt;
+      if (this.stuckT > 5) {
+        this.stuckT = 0;
+        const goal = this.path[this.path.length - 1];
+        this.path = ctx.terrain.findSeaPath({ x: this.x, y: this.y }, goal, this.draft);
+      }
+    } else {
+      this.stuckT = 0;
+    }
+  }
+
+  /** probe ahead: steer to whichever bearing has honest water */
+  private steerOffShoals(desired: number, ctx: SimContext): number {
+    const look = 60 + this.draft * 1.2 + this.speedNow * 5;
+    const probe = (a: number) => {
+      const px = this.x + Math.cos(a) * look;
+      const py = this.y + Math.sin(a) * look;
+      return ctx.terrain.shoreDistAt(px, py);
+    };
+    if (probe(desired) > this.draft * 1.25) return desired;
+    let best = desired;
+    let bestDepth = -Infinity;
+    for (let i = -3; i <= 3; i++) {
+      if (i === 0) continue;
+      const a = desired + i * 0.28;
+      const depth = probe(a);
+      if (depth > bestDepth) {
+        bestDepth = depth;
+        best = a;
+      }
+    }
+    return bestDepth > this.draft * 1.25 ? best : desired + Math.PI * 0.7;
+  }
+
+  /** per-mount weapons: each battery is its own weapon system */
+  private updateNavalFiring(dt: number, ctx: SimContext) {
+    const damaged = this.hp < this.def.hp * 0.4;
+    const fireRate = damaged ? 1.6 : 1;
+
+    for (const m of this.mounts) {
+      m.reload -= dt;
+      m.recoil = Math.max(0, m.recoil - dt * 3);
+      if (m.ammo <= 0) continue;
+
+      switch (m.def.kind) {
+        case 'GUN': {
+          const t = this.target;
+          const aim = t && !t.dead && !t.sinking && this.sees(t)
+            ? { x: t.x, y: t.y, lead: true, unit: t }
+            : this.navalAreaTarget
+              ? { x: this.navalAreaTarget.x, y: this.navalAreaTarget.y, lead: false, unit: null }
+              : null;
+          if (!aim) break;
+          const d = dist(this.x, this.y, aim.x, aim.y);
+          if (d > m.def.range || d < 40) break;
+          const shellSpeed = 240 + (m.def.calibre ?? 76) * 1.6;
+          const aimWorld = aim.lead && aim.unit
+            ? this.leadAngle(aim.unit, shellSpeed)
+            : angleOf(aim.x - this.x, aim.y - this.y);
+          const aimRel = aimWorld - this.angle;
+          m.angle = rotateToward(m.angle, aimRel, (m.def.turretRate ?? 1) * dt);
+          const aligned = Math.abs(angDiff(m.angle, aimRel));
+          if (m.reload <= 0 && aligned < 0.06 && this.ammo > 0) {
+            const mw = mountWorld(this, m);
+            const acc = aim.unit
+              ? this.def.accuracy * this.accuracyVs(aim.unit, ctx)
+              : this.def.accuracy * 0.92; // observed fire on a shore point
+            ctx.projectiles.fireNavalShell(ctx, this, mw, aim.x, aim.y, m.def, acc);
+            this.ammo -= m.def.barrels ?? 1;
+            m.reload = m.def.reload * fireRate * this.rng.range(0.9, 1.12);
+            m.recoil = 1;
+            this.lastFireT = ctx.time;
+            if (this.ammo <= 0) ctx.log(`${this.callsign} · MAIN BATTERY MAGAZINE EMPTY`, 'alert');
+          }
+          break;
+        }
+        case 'SSM': {
+          const t = this.target;
+          if (!t || t.dead || t.sinking || !this.sees(t)) break;
+          const d = dist(this.x, this.y, t.x, t.y);
+          if (d > m.def.range || d < 220) break;
+          if (m.reload <= 0) {
+            const mw = mountWorld(this, m);
+            ctx.projectiles.fireSSM(ctx, this, mw, t, m.def);
+            m.ammo--;
+            m.reload = m.def.reload * fireRate;
+            this.lastFireT = ctx.time;
+            if (m.ammo === 0) ctx.log(`${this.callsign} · SSM CELLS EXPENDED`, 'info');
+          }
+          break;
+        }
+        case 'SAM': {
+          const t = this.airTarget;
+          if (!t || t.dead) break;
+          const d = dist(this.x, this.y, t.x, t.y);
+          if (d > m.def.range) break;
+          if (m.reload <= 0) {
+            const mw = mountWorld(this, m);
+            ctx.projectiles.fireNavalSAM(ctx, this, mw, t, m.def);
+            m.ammo--;
+            m.reload = m.def.reload;
+            this.lastFireT = ctx.time;
+          }
+          break;
+        }
+        case 'CIWS': {
+          // last-ditch: aircraft first, then anything alongside
+          let t = this.airTarget;
+          if (!t || t.dead || dist(this.x, this.y, t.x, t.y) > m.def.range) {
+            t = this.target && !this.target.dead && dist(this.x, this.y, this.target.x, this.target.y) < m.def.range
+              ? this.target
+              : null;
+          }
+          if (!t) break;
+          const aimWorld = angleOf(t.x - this.x, t.y - this.y);
+          m.angle = rotateToward(m.angle, aimWorld - this.angle, 4 * dt);
+          if (m.reload <= 0 && m.burstLeft <= 0) {
+            m.burstLeft = m.def.burst ?? 10;
+            m.burstT = 0;
+            m.reload = m.def.reload * fireRate;
+          }
+          if (m.burstLeft > 0) {
+            m.burstT -= dt;
+            if (m.burstT <= 0) {
+              m.burstT = m.def.burstInterval ?? 0.05;
+              m.burstLeft--;
+              ctx.projectiles.fireAuto(ctx, this, t.x + this.rng.range(-8, 8), t.y + this.rng.range(-8, 8), m.def.damage, 0.8);
+              this.lastFireT = ctx.time;
+            }
+          }
+          break;
+        }
+        case 'TORP': {
+          const t = this.target;
+          if (!t || t.dead || t.sinking || !this.sees(t)) break;
+          const d = dist(this.x, this.y, t.x, t.y);
+          if (d > m.def.range || d < 120) break;
+          const bearing = angleOf(t.x - this.x, t.y - this.y);
+          const aligned = Math.abs(angDiff(this.angle, bearing));
+          if (m.reload <= 0 && aligned < 0.12) {
+            const mw = mountWorld(this, m);
+            ctx.projectiles.fireTorpedo(ctx, this, mw, t, m.def);
+            m.ammo--;
+            m.reload = 999;
+            this.lastFireT = ctx.time;
+            ctx.log(`${this.callsign} · TORPEDO IN THE WATER`, 'contact');
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  /** wakes, battle smoke, burning oil */
+  private updateNavalFx(dt: number, ctx: SimContext) {
+    if (this.speedNow > 1) {
+      this.wakeT -= dt;
+      if (this.wakeT <= 0) {
+        this.wakeT = 0.14;
+        const sternX = this.x - Math.cos(this.angle) * this.def.length * 0.42;
+        const sternY = this.y - Math.sin(this.angle) * this.def.length * 0.42;
+        const frac = clamp(this.speedNow / this.def.speed, 0, 1);
+        ctx.effects.spawnWake(sternX, sternY, this.angle, this.def.width, frac, this.def.length);
+        // bow spray at speed
+        if (frac > 0.45 && this.def.length > 60) {
+          const bowX = this.x + Math.cos(this.angle) * this.def.length * 0.44;
+          const bowY = this.y + Math.sin(this.angle) * this.def.length * 0.44;
+          ctx.effects.spawnBowWave(bowX, bowY, this.angle, this.def.width * frac, frac);
+        }
+      }
+    }
+    // a hurt hull speaks for itself
+    if (this.hp < this.def.hp * 0.62) {
+      this.burnT -= dt;
+      if (this.burnT <= 0) {
+        this.burnT = 0.3;
+        const bad = 1 - this.hp / this.def.hp;
+        const sx = this.x + this.rng.range(-this.def.length * 0.3, this.def.length * 0.3);
+        const sy = this.y + this.rng.range(-this.def.width * 0.3, this.def.width * 0.3);
+        ctx.effects.spawnSmoke(sx, sy, {
+          r: 2 + this.def.length * 0.02,
+          r1: 14 + this.def.length * 0.12,
+          life: 3.2,
+          alpha: 0.22 + bad * 0.2,
+          vy: -3,
+          dark: bad > 0.6 ? 1.5 : 1.1,
+        });
+      }
+    }
+  }
+
+  /** the long fall of a dying hull — fires, list, then the sea takes it */
+  private updateSinking(dt: number, ctx: SimContext) {
+    this.sinkT += dt;
+    this.speedNow = Math.max(0, this.speedNow - dt * (this.def.accel ?? 1) * 1.4);
+    this.x += Math.cos(this.angle) * this.speedNow * dt;
+    this.y += Math.sin(this.angle) * this.speedNow * dt;
+
+    // fires and oil smoke all the way down
+    this.burnT -= dt;
+    if (this.burnT <= 0) {
+      this.burnT = 0.22;
+      const sx = this.x + this.rng.range(-this.def.length * 0.35, this.def.length * 0.35);
+      const sy = this.y + this.rng.range(-this.def.width * 0.35, this.def.width * 0.35);
+      ctx.effects.spawnSmoke(sx, sy, {
+        r: 2.5 + this.def.length * 0.025,
+        r1: 18 + this.def.length * 0.14,
+        life: 4.2,
+        alpha: 0.4,
+        vy: -4.5,
+        dark: 1.6,
+      });
+    }
+    // the sea pouring over the deck
+    if (this.rng.chance(dt * 2)) {
+      ctx.effects.spawnWaterSplash(
+        this.x + this.rng.range(-this.def.length * 0.4, this.def.length * 0.4),
+        this.y + this.rng.range(-this.def.width * 0.5, this.def.width * 0.5),
+        0.5 + this.def.length / 180,
+        false
+      );
+    }
+
+    if (this.sinkT >= this.sinkDuration) {
+      this.dead = true;
+      ctx.effects.addShipWreck({
+        x: this.x,
+        y: this.y,
+        angle: this.angle,
+        type: this.def.type,
+        faction: this.faction,
+        born: ctx.time,
+        smokeUntil: ctx.time + 220 + this.def.length * 2.4,
+        listing: 0.4 + this.rng.next() * 0.5,
+      });
+      // the sea remembers — oil and ink, and a hazard to navigation
+      ctx.effects.stampScorch(this.x, this.y, this.def.length * 0.55, 0.42);
+      ctx.effects.stampOilSlick(this.x, this.y, this.def.length * 0.6);
+      ctx.terrain.sea.addNavalWreck(this.x, this.y, this.def.length * 0.36);
+      ctx.audio.explosion('kill', this.x, this.y, 2.4);
+      // the score holds its breath when something enormous dies
+      if (this.def.length > 200) {
+        ctx.audio.music?.stinger('capitalDown');
+      }
+      ctx.log(
+        this.def.length > 200
+          ? `${this.callsign} IS GONE — THE BIG BOI IS DOWN`
+          : `${this.callsign} FOUNDERED — HULL LOST WITH ALL HANDS`,
+        'alert'
+      );
+    }
+  }
+
   // ── aircraft ───────────────────────────────────────────────
 
   private updateAir(dt: number, ctx: SimContext) {
@@ -813,13 +1294,15 @@ export class Unit {
           let best: Unit | null = null;
           let bd = Infinity;
           for (const u of this.visibleTargets) {
-            if (u.dead || u.isAir || u.def.kind === 'FACTORY') continue;
+            if (u.dead || u.isAir || u.def.kind === 'FACTORY' || u.sinking) continue;
             const dd = dist(this.x, this.y, u.x, u.y);
             if (dd < 1900 && dd < bd) {
               const toT = angleOf(u.x - this.x, u.y - this.y);
               // prefer targets roughly ahead
               const off = Math.abs(angDiff(this.angle, toT));
-              const score = dd + off * 400;
+              // the Frogfoot is a ship-killer first — the fleet is its war
+              const shipBias = this.def.type === 'SU25K' && u.def.kind === 'NAVAL' ? -650 : 0;
+              const score = dd + off * 400 + shipBias;
               if (score < bd) {
                 bd = score;
                 best = u;
@@ -846,14 +1329,22 @@ export class Unit {
       }
 
       case 'RTB': {
-        // exit toward SW
-        const desired = angleOf(-600 - this.x, 3300 - this.y);
+        // exit toward home airspace — friendlies recovered to the SW,
+        // the enemy to his NE plateau
+        const home = this.faction === 'FRIEND'
+          ? { x: -600, y: 3300 }
+          : { x: 4300, y: -300 };
+        const desired = angleOf(home.x - this.x, home.y - this.y);
         const diff = angDiff(this.angle, desired);
         this.angle += clamp(diff, -this.def.turnRate * dt, this.def.turnRate * dt);
         this.x += Math.cos(this.angle) * speed * dt;
         this.y += Math.sin(this.angle) * speed * dt;
         this.bank = clamp(this.bank + (Math.sign(diff) - this.bank) * dt * 2, -1, 1);
-        if (this.x < -260 || this.y > ctx.terrain.H + 260) {
+        const offMap =
+          this.faction === 'FRIEND'
+            ? this.x < -260 || this.y > ctx.terrain.H + 260
+            : this.x > ctx.terrain.W + 260 || this.y < -260;
+        if (offMap) {
           this.airState = 'REARM';
           this.rearmT = 34;
           this.hp = Math.max(this.hp, this.def.hp * 0.6);
@@ -867,9 +1358,15 @@ export class Unit {
           this.airState = 'INBOUND';
           this.ammo = this.def.ammo;
           this.hp = this.def.hp;
-          this.x = 200;
-          this.y = ctx.terrain.H - 60;
-          this.angle = -Math.PI / 3;
+          if (this.faction === 'FRIEND') {
+            this.x = 200;
+            this.y = ctx.terrain.H - 60;
+            this.angle = -Math.PI / 3;
+          } else {
+            this.x = ctx.terrain.W - 140;
+            this.y = 90;
+            this.angle = Math.PI * 0.62;
+          }
           ctx.log(`${this.callsign} · ON STATION — INBOUND`, 'info');
         }
         break;
@@ -904,16 +1401,43 @@ export class Unit {
     this.airState = 'INBOUND';
     this.ammo = this.def.ammo;
     this.hp = this.def.hp;
-    this.x = 200;
-    this.y = 3200;
-    this.angle = -Math.PI / 3;
+    if (this.faction === 'FRIEND') {
+      this.x = 200;
+      this.y = 3200;
+      this.angle = -Math.PI / 3;
+    } else {
+      this.x = 3900;
+      this.y = 120;
+      this.angle = Math.PI * 0.62;
+    }
   }
 
   // ── damage ─────────────────────────────────────────────────
 
   takeDamage(dmg: number, ctx: SimContext, projKind?: string, attacker?: Unit, aspect = 1) {
-    if (this.dead) return;
+    if (this.dead || this.sinking) return;
     let d = dmg * aspect;
+    // ── naval armour table ── a warship shrugs off what kills tanks
+    if (this.isShip) {
+      if (projKind === 'AUTO') d *= 0.3;
+      else if (projKind === 'SHELL') d *= 0.6;
+      else if (projKind === 'ARTY') d *= 0.85;
+      else if (projKind === 'MISSILE_SPAA') d *= 0.4;
+      else if (projKind === 'SSM') d *= 1.35;
+      else if (projKind === 'TORPEDO') d *= 2.6;
+    } else {
+      if (projKind === 'NAVAL_SHELL') {
+        // a capital-calibre shell against thin-skinned vehicles
+        if (this.def.kind === 'HQ') d *= 0.6;
+        else if (this.def.kind === 'FACTORY') d *= 0.9;
+        else d *= 1.2;
+      }
+      if (projKind === 'SSM') {
+        if (this.def.kind === 'FACTORY') d *= 1.3;
+        else if (this.def.kind !== 'HQ') d *= 1.1;
+      }
+      if (projKind === 'TORPEDO') d *= 0.05; // a fish cannot bite land
+    }
     if (projKind === 'AUTO') {
       if (this.def.kind === 'MBT') d *= 0.28;
       else if (this.def.kind === 'IFV') d *= 0.7;
@@ -927,8 +1451,9 @@ export class Unit {
     if (projKind === 'ARTY' && this.def.kind === 'FACTORY') d *= 1.15;
     this.hp -= d;
     this.damageFlash = 1;
-    // being hit is suppressing
-    this.suppression = Math.min(1, this.suppression + 0.12 + Math.min(0.24, d / 140));
+    // being hit is suppressing — less so behind armour plate
+    const supHit = this.isShip ? 0.05 + Math.min(0.1, d / 320) : 0.12 + Math.min(0.24, d / 140);
+    this.suppression = Math.min(1, this.suppression + supHit);
     if (attacker) {
       this.lastAttacker = attacker;
       this.lastAttackedT = ctx.time;
@@ -940,6 +1465,58 @@ export class Unit {
   }
 
   die(ctx: SimContext) {
+    // ── a ship does not vanish — it burns, lists, and founders ──
+    if (this.isShip) {
+      if (this.sinking) return;
+      this.sinking = true;
+      this.sinkT = 0;
+      this.hp = 0;
+      this.path = [];
+      this.dest = null;
+      this.order = { type: 'STOP' };
+      this.target = null;
+      this.airTarget = null;
+      const fx = ctx.effects;
+      const big = this.def.length > 200;
+      fx.spawnExplosion(this.x, this.y, {
+        dir: this.angle,
+        dirStrength: 0.5,
+        scale: big ? 5.2 : 1.8 + this.def.length / 70,
+        crater: 0,
+        smoke: 6 + Math.round(this.def.length / 18),
+        debris: 8 + Math.round(this.def.length / 14),
+        stains: 0,
+        ring: true,
+        sound: 'kill',
+        shake: big ? 9 : 3 + this.def.length / 60,
+      });
+      // rolling secondary detonations as magazines and fuel catch
+      fx.scheduleBlasts(this.x, this.y, {
+        count: 3 + Math.round(this.def.length / 45),
+        duration: this.sinkDuration * 0.85,
+        spread: this.def.length * 0.34,
+        scaleMin: big ? 2.2 : 0.8,
+        scaleMax: big ? 4.2 : 1.8,
+        delay: 0.4,
+      });
+      // water columns thrown up around the hull
+      for (let i = 0; i < 3 + Math.round(this.def.length / 55); i++) {
+        fx.spawnWaterSplash(
+          this.x + this.rng.range(-this.def.length * 0.4, this.def.length * 0.4),
+          this.y + this.rng.range(-this.def.width * 0.6, this.def.width * 0.6),
+          1 + this.def.length / 130,
+          true
+        );
+      }
+      ctx.audio.shipBreaking(this.x, this.y, this.def.length);
+      ctx.log(
+        big
+          ? `${this.callsign} — CAPITAL SHIP HIT — SHE IS GOING DOWN`
+          : `${this.callsign} — HULL BROKEN — SINKING`,
+        'alert'
+      );
+      return;
+    }
     this.dead = true;
     const fx = ctx.effects;
     if (this.def.kind === 'FACTORY') {
@@ -1075,6 +1652,17 @@ export class Unit {
 
   getActivity(): UnitActivity {
     if (this.dead) return 'DESTROYED';
+    if (this.isShip) {
+      if (this.sinking) return 'SINKING';
+      if (this.target && !this.target.dead) {
+        if (this.def.type === 'PATROL' && dist(this.x, this.y, this.target.x, this.target.y) < 720) {
+          return 'TORPEDO RUN';
+        }
+        return this.reloadT > 0 ? 'RELOADING' : 'ENGAGING';
+      }
+      if (this.path.length > 0) return 'UNDERWAY';
+      return 'HOLDING';
+    }
     if (this.isAir) {
       switch (this.airState) {
         case 'STANDBY':

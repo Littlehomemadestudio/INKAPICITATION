@@ -4,9 +4,18 @@
 
 export type Faction = 'FRIEND' | 'ENEMY';
 
-export type UnitKind = 'MBT' | 'IFV' | 'SPG' | 'REC' | 'AIR' | 'SPAA' | 'HQ' | 'FACTORY';
+export type UnitKind = 'MBT' | 'IFV' | 'SPG' | 'REC' | 'AIR' | 'SPAA' | 'HQ' | 'FACTORY' | 'NAVAL';
 
-export type ProjectileKind = 'SHELL' | 'AUTO' | 'ARTY' | 'MISSILE_AIR' | 'MISSILE_GROUND' | 'MISSILE_SPAA';
+export type ProjectileKind =
+  | 'SHELL'
+  | 'AUTO'
+  | 'ARTY'
+  | 'MISSILE_AIR'
+  | 'MISSILE_GROUND'
+  | 'MISSILE_SPAA'
+  | 'NAVAL_SHELL'
+  | 'SSM'
+  | 'TORPEDO';
 
 export type IntelState = 'HIDDEN' | 'GHOST' | 'DETECTED';
 
@@ -26,7 +35,10 @@ export type UnitActivity =
   | 'DESTROYED'
   | 'INBOUND'
   | 'SUPPRESSED'
-  | 'PINNED';
+  | 'PINNED'
+  | 'UNDERWAY'
+  | 'TORPEDO RUN'
+  | 'SINKING';
 
 export type OrderType = 'MOVE' | 'ATTACK' | 'ATTACK_MOVE' | 'STOP' | 'HOLD' | 'FIRE_MISSION' | 'PATROL';
 
@@ -106,6 +118,8 @@ export interface BattalionDef {
   buildTime: number;
   desc: string;
   air?: boolean;
+  /** hulls arrive from open water at the fleet anchorage */
+  naval?: boolean;
   /** the actual force package (engine-side) */
   units: { type: string; n: number }[];
 }
@@ -138,6 +152,16 @@ export interface HudSnapshot {
   } | null;
   log: LogEntry[];
   air: { callsign: string; state: string; missiles: number; hp: number }[];
+  navy: {
+    callsign: string;
+    cls: string;
+    state: string;
+    hp: number;
+    hpMax: number;
+    guns: number;
+    ssm: number;
+    torps: number;
+  }[];
   cursorMode: 'NORMAL' | 'ATTACK_MOVE' | 'FIRE_MISSION';
   result: null | 'VICTORY' | 'DEFEAT';
   stats: {

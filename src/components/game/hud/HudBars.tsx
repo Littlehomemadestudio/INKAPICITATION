@@ -11,6 +11,7 @@
 // ─────────────────────────────────────────────────────────────
 
 import type { RefObject } from 'react';
+import { useState } from 'react';
 import type { HudSnapshot, LogEntry, BattalionDef } from '@/game/core/types';
 import type { Game } from '@/game/Game';
 import { fmtClock } from '@/game/Game';
@@ -271,13 +272,22 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
           <DetailBody hud={hud} />
         </div>
 
-        {/* ── AIR OPERATIONS ── */}
-        <div className="ps-panel ps-air-panel flex flex-col min-h-0">
+        {/* ── OPERATIONS: AIR | NAVAL — two lists, two independent scrolls ── */}
+        <div className="ps-panel ps-ops-panel flex flex-col min-h-0">
           <div className="ps-header">
-            <span>AIR OPS</span>
-            <span className="text-[#8d887b]">CAS</span>
+            <span>OPERATIONS</span>
+            <span className="text-[#8d887b]">AIR · SEA</span>
           </div>
-          <AirBody hud={hud} gameRef={gameRef} />
+          <div className="flex-1 min-h-0 flex">
+            <div className="flex-1 min-w-0 flex flex-col border-r border-[#242119]">
+              <div className="font-mono text-[8px] tracking-[0.2em] text-[#5d584d] px-2 pt-1 pb-[2px] border-b border-[#1d1b16]">AIR OPS</div>
+              <AirBody hud={hud} gameRef={gameRef} />
+            </div>
+            <div className="flex-1 min-w-0 flex flex-col">
+              <div className="font-mono text-[8px] tracking-[0.2em] text-[#5d584d] px-2 pt-1 pb-[2px] border-b border-[#1d1b16]">NAVAL OPS</div>
+              <NavyBody hud={hud} />
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -287,15 +297,37 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
 // ── deployment panel ──────────────────────────────────────────
 
 function DeployBody({ hud, gameRef }: { hud: HudSnapshot | null; gameRef: RefObject<Game | null> }) {
-  const battalions = hud?.battalions ?? [];
+  const [tab, setTab] = useState<'LAND' | 'SEA'>('LAND');
+  const battalions = (hud?.battalions ?? []).filter((b) => (!!b.naval) === (tab === 'SEA'));
   const production = hud?.production ?? [];
   const p0 = production[0];
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-      <div className="ps-deploy-grid flex-1 min-h-0 grid gap-1 p-1.5 content-start">
-        {battalions.map((b) => (
-          <DeployButton key={b.id} b={b} gameRef={gameRef} ink={hud?.ink ?? 0} />
+      {/* GROUND / FLEET — one war, two mediums. only the list scrolls */}
+      <div className="flex shrink-0 border-b border-[#242119]">
+        {(['LAND', 'SEA'] as const).map((t) => (
+          <button
+            key={t}
+            className={`ps-tab flex-1 font-mono text-[9px] tracking-[0.22em] py-[3px] ${tab === t ? 'ps-tab-on' : ''}`}
+            onClick={() => {
+              setTab(t);
+              const g = gameRef.current;
+              if (g) g.audio.uiTick();
+            }}
+          >
+            {t === 'LAND' ? 'GROUND' : 'FLEET'}
+          </button>
         ))}
+      </div>
+      <div className="ps-scroll flex-1 min-h-0 overflow-y-auto">
+        <div className="ps-deploy-grid grid gap-1 p-1.5 content-start">
+          {battalions.map((b) => (
+            <DeployButton key={b.id} b={b} gameRef={gameRef} ink={hud?.ink ?? 0} />
+          ))}
+          {!battalions.length && (
+            <span className="font-mono text-[8.5px] text-[#5d584d] tracking-[0.14em] px-1 py-1.5">NOTHING AVAILABLE</span>
+          )}
+        </div>
       </div>
       <div className="border-t border-[#242119] px-2 h-[24px] shrink-0 flex items-center gap-2 overflow-hidden">
         {!p0 ? (
@@ -350,9 +382,9 @@ function DeployButton({ b, gameRef, ink }: { b: BattalionDef & { available: bool
 function AirBody({ hud, gameRef }: { hud: HudSnapshot | null; gameRef: RefObject<Game | null> }) {
   const air = hud?.air ?? [];
   return (
-    <div className="flex-1 min-h-0 p-1.5 flex flex-col gap-1.5 overflow-hidden">
+    <div className="ps-scroll flex-1 min-h-0 p-1.5 flex flex-col gap-1.5 overflow-y-auto">
       {air.map((a) => (
-        <div key={a.callsign} className="border border-[#242119] px-2 py-1">
+        <div key={a.callsign} className="border border-[#242119] px-2 py-1 shrink-0">
           <div className="flex items-center justify-between">
             <span className="font-mono text-[10px] text-[#d9d6cc]">{a.callsign}</span>
             <span
@@ -393,6 +425,52 @@ function AirBody({ hud, gameRef }: { hud: HudSnapshot | null; gameRef: RefObject
         </div>
       ))}
       {!air.length && <span className="font-mono text-[9px] text-[#5d584d]">NO AIR ASSETS</span>}
+    </div>
+  );
+}
+
+function NavyBody({ hud }: { hud: HudSnapshot | null }) {
+  const navy = hud?.navy ?? [];
+  return (
+    <div className="ps-scroll flex-1 min-h-0 p-1.5 flex flex-col gap-1.5 overflow-y-auto">
+      {navy.map((n) => {
+        const dying = n.state === 'SINKING' || n.state === 'LOST';
+        return (
+          <div key={n.callsign} className={`border px-2 py-1 shrink-0 ${dying ? 'border-[#4a453a]' : 'border-[#242119]'}`}>
+            <div className="flex items-center justify-between gap-1">
+              <span className="font-mono text-[10px] text-[#d9d6cc] truncate">{n.callsign}</span>
+              <span className="font-mono text-[8px] text-[#5d584d] tracking-[0.08em] shrink-0">{n.cls}</span>
+            </div>
+            <div className="flex items-center justify-between mt-[2px]">
+              <span
+                className={`font-mono text-[8px] tracking-[0.12em] truncate ${
+                  dying ? 'text-[#f3f1ea] ps-blink' : n.state === 'UNDERWAY' || n.state.startsWith('ENGAG') || n.state === 'TORPEDO RUN' ? 'text-[#d9d6cc]' : 'text-[#8d887b]'
+                }`}
+              >
+                {n.state}
+              </span>
+              <span className="font-mono text-[8px] text-[#5d584d] tabular-nums shrink-0">
+                {n.hp}/{n.hpMax}HP
+              </span>
+            </div>
+            <div className="ps-bar mt-[3px]" style={{ height: 3 }}>
+              <i style={{ width: `${(n.hp / n.hpMax) * 100}%` }} />
+            </div>
+            <div className="flex items-center gap-2 mt-[3px] font-mono text-[8px] text-[#5d584d]">
+              <span title="main battery rounds">GUN {n.guns}</span>
+              {n.ssm > 0 && <span title="surface-to-surface missiles">SSM {n.ssm}</span>}
+              {n.torps > 0 && <span title="torpedoes">TORP {n.torps}</span>}
+            </div>
+          </div>
+        );
+      })}
+      {!navy.length && (
+        <span className="font-mono text-[9px] text-[#5d584d] leading-[1.7]">
+          NO NAVAL ASSETS
+          <br />
+          <span className="text-[#6b655a]">DEPLOY HULLS — FLEET TAB</span>
+        </span>
+      )}
     </div>
   );
 }

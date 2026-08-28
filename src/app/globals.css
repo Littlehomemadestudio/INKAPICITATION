@@ -309,12 +309,37 @@
   color: var(--ps-txt);
   border-color: #5d584d;
 }
+.ps-kind-chip[data-k='SEA'] {
+  color: var(--ps-txt);
+  border-color: #5d584d;
+}
 
-/* ── the command deck — instruments dock, they never scroll ──
-   ONE grid: MAP · FORMATION · DEPLOY · DETAIL · AIR.
+/* deploy tab rail — GROUND / FLEET */
+.ps-tab {
+  color: var(--ps-faint);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: color 120ms linear, background 120ms linear, box-shadow 120ms linear;
+}
+.ps-tab:hover {
+  color: var(--ps-dim);
+  background: #17150f;
+}
+.ps-tab-on {
+  color: var(--ps-paper);
+  background: #201d18;
+  box-shadow: inset 0 -2px 0 var(--ps-txt);
+}
+.ps-tab-on:hover {
+  color: var(--ps-paper);
+}
+
+/* ── the command deck — instruments dock; only unit LISTS scroll ─
+   ONE grid: MAP · FORMATION · DEPLOY · DETAIL · OPERATIONS (AIR|SEA).
    Comms traffic rides the battlefield itself (top-left).
    Verified 1366×768 · 1440×900 · 1920×1080 — every control
-   on screen, nothing clipped, nothing scrolled.            */
+   on screen, nothing clipped, the map never scrolls.        */
 
 .ps-bottombar {
   border-top: 1px solid var(--ps-line);
@@ -325,10 +350,10 @@
   display: grid;
   grid-template-columns:
     var(--ps-w-map)
-    minmax(232px, 1fr)
-    minmax(294px, 1.08fr)
-    minmax(296px, 1.18fr)
-    var(--ps-w-air);
+    minmax(218px, 1fr)
+    minmax(278px, 1.06fr)
+    minmax(248px, 0.94fr)
+    minmax(326px, 1.32fr);
   overflow: hidden;
 }
 
@@ -344,14 +369,14 @@
 :root {
   --ps-h-bottom: 168px;
   --ps-w-map: 208px;
-  --ps-w-air: 192px;
+  --ps-w-ops: 192px;
 }
 
 /* generous decks get roomier fixed rails */
 @media (min-width: 1700px) {
   :root {
     --ps-w-map: 224px;
-    --ps-w-air: 204px;
+    --ps-w-ops: 204px;
   }
 }
 
@@ -360,14 +385,14 @@
 @media (max-width: 1240px) {
   :root {
     --ps-w-map: 196px;
-    --ps-w-air: 184px;
+    --ps-w-ops: 184px;
   }
   .ps-deck {
     grid-template-columns:
       var(--ps-w-map)
-      minmax(232px, 1fr)
-      minmax(294px, 1.12fr)
-      var(--ps-w-air);
+      minmax(218px, 1fr)
+      minmax(278px, 1.12fr)
+      minmax(316px, 1.3fr);
   }
   .ps-panel-detail {
     display: none;

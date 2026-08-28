@@ -12,6 +12,8 @@ const GHOST_TIME = 32;
 /** eye height of a ground vehicle above local terrain (m) */
 const EYE_GROUND = 4.5;
 const EYE_TARGET = 3.2;
+/** a warship's fire directors sit high — scale by hull size */
+const eyeOf = (u: Unit): number => (u.isShip ? 6 + u.def.length * 0.05 : EYE_GROUND);
 
 export class VisionSystem {
   timer = 0;
@@ -106,10 +108,11 @@ export class VisionSystem {
       return true;
     }
     const tgH = ctx.terrain.heightAt(target.x, target.y);
+    // islands are real ground: a hull behind OSTROV BOLSHOY is hidden
     return ctx.terrain.losClear(
       observer.x,
       observer.y,
-      obH + EYE_GROUND,
+      obH + eyeOf(observer),
       target.x,
       target.y,
       tgH + EYE_TARGET
@@ -169,6 +172,8 @@ function labelFor(u: Unit): string {
       return 'COMMAND';
     case 'FACTORY':
       return 'INK WORKS';
+    case 'NAVAL':
+      return u.def.length > 200 ? 'CAPITAL SHIP' : 'WARSHIP';
     default:
       return 'UNIT';
   }

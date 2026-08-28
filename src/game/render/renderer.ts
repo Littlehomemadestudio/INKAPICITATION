@@ -9,6 +9,7 @@ import { Camera } from '../systems/camera';
 import type { Unit } from '../entities/units';
 import type { Game } from '../Game';
 import { drawVehicle, drawSelectionBrackets, FRIEND_STYLE, ENEMY_STYLE, WRECK_STYLE } from '../entities/unitDraw';
+import { drawShip, drawShipWreck } from '../entities/shipDraw';
 import { clamp } from '../core/math';
 import { coverFrom } from '../systems/cover';
 import type { ObjectiveState, Sector } from '../core/types';
@@ -47,6 +48,7 @@ export class Renderer {
 
     cam.applyTransform(ctx, dpr);
 
+    game.terrainRenderer.timeNow = game.time;
     game.terrainRenderer.drawBase(ctx, cam, game.effects.scars);
     game.terrainRenderer.drawFeatures(ctx, cam);
     game.effects.drawCraters(ctx, cam);
@@ -55,12 +57,18 @@ export class Renderer {
     const hovers: HoverLabel[] = [];
     this.drawSectors(ctx, game, cam);
     this.drawAssembly(ctx, game, cam);
+    this.drawAnchorage(ctx, game, cam);
     this.drawObjectives(ctx, game, cam);
     this.drawFactories(ctx, game, cam, hovers);
+    this.drawShipWrecksLayer(ctx, game, cam);
     this.drawWrecks(ctx, game, cam);
+    // foam under the fleet, then the fleet itself
+    game.effects.drawWakes(ctx, cam);
     this.drawUnits(ctx, game, cam, hovers);
     game.projectiles.draw(ctx);
     game.effects.drawCore(ctx);
+    // water columns rise above the hulls that missed them
+    game.effects.drawWaterSplashes(ctx, cam);
     game.effects.drawOrderMarkers(ctx);
     game.effects.drawSmoke(ctx);
     game.terrainRenderer.drawFurniture(ctx);
@@ -172,6 +180,33 @@ export class Renderer {
       ctx.strokeText(label, s.pos.x, s.pos.y - ms * 1.4);
       ctx.fillStyle = 'rgba(28,25,19,0.85)';
       ctx.fillText(label, s.pos.x, s.pos.y - ms * 1.4);
+    }
+    ctx.restore();
+  }
+
+  /** the fleet anchorage — where hulls arrive from open water */
+  private drawAnchorage(ctx: CanvasRenderingContext2D, game: Game, cam: Camera) {
+    if (game.result) return;
+    const sea = game.terrain.sea;
+    const a = sea.anchorage;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(20,17,12,0.4)';
+    ctx.lineWidth = Math.max(1, 1 / cam.zoom);
+    ctx.setLineDash([12, 9]);
+    ctx.beginPath();
+    ctx.arc(a.x, a.y, 170, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (cam.zoom > 0.3) {
+      const size = clamp(10 / cam.zoom + 4, 10, 20);
+      ctx.font = `600 ${size}px ${this.sansFont}`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(28,25,19,0.6)';
+      ctx.strokeStyle = 'rgba(243,241,234,0.85)';
+      ctx.lineWidth = size * 0.2;
+      const t = 'FLEET ANCHORAGE';
+      ctx.strokeText(t, a.x, a.y - 182);
+      ctx.fillText(t, a.x, a.y - 182);
     }
     ctx.restore();
   }
@@ -358,6 +393,39 @@ export class Renderer {
 
   // ── wrecks ─────────────────────────────────────────────────
 
+  /** half-sunk hulls — the ocean's memory of the battle */
+  private drawShipWrecksLayer(ctx: CanvasRenderingContext2D, game: Game, cam: Camera) {
+    const zoom = cam.zoom;
+    const detail = zoom < 0.28 ? 0 : zoom < 0.85 ? 1 : 2;
+    for (const w of game.effects.shipWrecks) {
+      // strategic read: a dark stain on the water
+      if (zoom < 0.5) {
+        const r = Math.max(9, 15 / zoom);
+        const g = ctx.createRadialGradient(w.x, w.y, 0, w.x, w.y, r);
+        g.addColorStop(0, 'rgba(22,19,14,0.55)');
+        g.addColorStop(1, 'rgba(22,19,14,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(w.x, w.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const age = game.time - w.born;
+      const alpha = clamp(1 - age / 1600, 0.62, 1);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(w.x, w.y);
+      ctx.rotate(w.angle);
+      drawShipWreck(ctx, {
+        type: w.type as never,
+        style: WRECK_STYLE,
+        detail,
+        listing: w.listing,
+        mounts: [],
+      });
+      ctx.restore();
+    }
+  }
+
   private drawWrecks(ctx: CanvasRenderingContext2D, game: Game, cam: Camera) {
     const zoom = cam.zoom;
     const detail = zoom < 0.28 ? 0 : zoom < 0.85 ? 1 : 2;
@@ -447,11 +515,12 @@ export class Renderer {
     const minPx = 15;
     const scaleFor = (u: Unit) => Math.min(4.2, Math.max(1, minPx / (zoom * u.def.length)));
 
-    // ground units first, aircraft on top
+    // ground units first, aircraft on top — the fleet draws between
     const ground: Unit[] = [];
     const air: Unit[] = [];
     for (const u of game.units) {
       if (u.dead || u.def.kind === 'FACTORY') continue;
+      if (u.isShip) continue; // the fleet has its own pass
       if (u.isAir) {
         if (u.airState === 'STANDBY' || u.airState === 'REARM') continue;
         air.push(u);
@@ -678,6 +747,130 @@ export class Renderer {
             ],
           });
         }
+      }
+    }
+
+    // ships — between the ground war and the air war, the fleet
+    const ships: Unit[] = [];
+    for (const u of game.units) {
+      if (u.dead || !u.isShip) continue;
+      if (u.faction === 'ENEMY' && u.intel === 'HIDDEN') continue;
+      ships.push(u);
+    }
+    for (const u of ships) {
+      const selected = game.input.selection.includes(u);
+      const ghost = u.faction === 'ENEMY' && u.intel === 'GHOST';
+      const gx = ghost ? u.knownX : u.x;
+      const gy = ghost ? u.knownY : u.y;
+      const es = Math.min(3.4, Math.max(1, minPx / (zoom * u.def.length)));
+
+      ctx.save();
+      ctx.translate(gx, gy);
+
+      if (ghost) {
+        ctx.globalAlpha = 0.34;
+        ctx.strokeStyle = '#565046';
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.arc(0, 0, u.def.length * 0.5 * es, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      }
+
+      // water shadow — the hull displaces the sea
+      if (!ghost) {
+        ctx.save();
+        ctx.translate(3.4 / zoom * 2, 4.2 / zoom * 2);
+        ctx.rotate(u.angle);
+        ctx.fillStyle = 'rgba(28,36,42,0.22)';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, u.def.length * 0.5 * es, u.def.width * 0.55 * es, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.save();
+      ctx.scale(es, es);
+      ctx.rotate(u.angle);
+      const sinking = u.sinking ? clamp(u.sinkT / u.sinkDuration, 0, 1) : 0;
+      drawShip(ctx, {
+        type: u.def.type,
+        style: u.faction === 'FRIEND' ? FRIEND_STYLE : ENEMY_STYLE,
+        detail,
+        mounts: u.mounts,
+        listing: sinking,
+      });
+      ctx.restore();
+
+      // damage flash
+      if (u.damageFlash > 0) {
+        ctx.save();
+        ctx.rotate(u.angle);
+        ctx.globalAlpha = u.damageFlash * 0.5;
+        ctx.fillStyle = '#f3f1ea';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, u.def.length * 0.42 * es, u.def.width * 0.42 * es, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // selection brackets + gunnery rings + command path
+      if (selected && u.faction === 'FRIEND') {
+        drawSelectionBrackets(ctx, u.def.length * 0.55 * Math.max(es, 1), 8 / zoom, Math.max(1.4, 1.6 / zoom), '#141210');
+        const visR = u.def.vision;
+        ctx.strokeStyle = 'rgba(20,18,16,0.16)';
+        ctx.setLineDash([12 / zoom, 10 / zoom]);
+        ctx.lineWidth = Math.max(1, 1 / zoom);
+        ctx.beginPath();
+        ctx.arc(0, 0, visR, 0, Math.PI * 2);
+        ctx.stroke();
+        if (u.def.range > 40) {
+          ctx.strokeStyle = 'rgba(20,18,16,0.34)';
+          ctx.setLineDash([18 / zoom, 10 / zoom]);
+          ctx.lineWidth = Math.max(1.1, 1.3 / zoom);
+          ctx.beginPath();
+          ctx.arc(0, 0, u.def.range, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        if (u.dest) {
+          ctx.strokeStyle = 'rgba(20,17,12,0.5)';
+          ctx.lineWidth = Math.max(0.9, 1 / zoom);
+          ctx.setLineDash([6, 6]);
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(u.dest.x - gx, u.dest.y - gy);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.strokeRect(u.dest.x - gx - 4, u.dest.y - gy - 4, 8, 8);
+        }
+      }
+
+      // hull integrity — a wide, restrained bar
+      if (u.hp < u.def.hp && !ghost) {
+        const w = Math.min(64, Math.max(20, u.def.length * 1.4 * Math.max(es, 1)));
+        const yy = (u.def.width * 0.5 + 12 / zoom) * Math.max(es, 1);
+        ctx.fillStyle = 'rgba(243,241,234,0.85)';
+        ctx.fillRect(-w / 2, yy, w, 3);
+        ctx.fillStyle = '#141210';
+        ctx.fillRect(-w / 2, yy, (w * u.hp) / u.def.hp, 3);
+      }
+      ctx.restore();
+
+      if (game.input.hoverUnit === u) {
+        const s = cam.worldToScreen(gx, gy);
+        hovers.push({
+          sx: s.x,
+          sy: s.y,
+          hostile: u.faction === 'ENEMY',
+          lines: [
+            `${u.callsign} · ${u.def.shortName}`,
+            u.sinking ? 'GOING DOWN' : u.getActivity(),
+            u.faction === 'FRIEND' ? `GUNS ${u.ammo} · GRID ${u.positionGrid()}` : `GRID ${u.positionGrid()}`,
+          ],
+        });
       }
     }
 
@@ -941,6 +1134,36 @@ export class Renderer {
           ctx.strokeRect(u.knownX * sx - 1.5, u.knownY * sy - 1.5, 3, 3);
         }
       }
+    }
+
+    // ships — elongated hull glyphs on the blue
+    for (const u of game.units) {
+      if (u.dead || !u.isShip) continue;
+      const friendly = u.faction === 'FRIEND';
+      if (!friendly && u.intel !== 'DETECTED' && u.intel !== 'GHOST') continue;
+      const wx = friendly || u.intel === 'DETECTED' ? u.x : u.knownX;
+      const wy = friendly || u.intel === 'DETECTED' ? u.y : u.knownY;
+      ctx.save();
+      ctx.translate(wx * sx, wy * sy);
+      ctx.rotate(u.angle);
+      const len = Math.max(3, u.def.length * sx * 1.35);
+      const wid = Math.max(1.1, len * 0.3);
+      if (friendly || u.intel === 'DETECTED') {
+        ctx.fillStyle = friendly ? '#0c0b08' : '#6b655a';
+        ctx.fillRect(-len / 2, -wid / 2, len, wid);
+      } else {
+        ctx.strokeStyle = 'rgba(90,84,74,0.8)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-len / 2, -wid / 2, len, wid);
+      }
+      ctx.restore();
+    }
+
+    // ship wrecks — the bay's memory
+    ctx.fillStyle = 'rgba(20,17,12,0.55)';
+    for (const sw of game.effects.shipWrecks) {
+      const len = Math.max(2, sw.type === 'BATTLESHIP' ? 5 : 3);
+      ctx.fillRect(sw.x * sx - len / 2, sw.y * sy - 1, len, 2);
     }
 
     // viewport

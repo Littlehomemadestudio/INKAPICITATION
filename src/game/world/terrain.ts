@@ -7,6 +7,7 @@
 
 import { Noise2D } from '../core/noise';
 import { RNG, clamp, dist, Vec2 } from '../core/math';
+import { Sea } from './sea';
 
 export interface TreePoint {
   x: number;
@@ -36,7 +37,9 @@ export type BuildingKind =
   | 'DEPOT'
   | 'SUBSTATION'
   | 'CHECKPOINT'
-  | 'RUIN';
+  | 'RUIN'
+  | 'WAREHOUSE'
+  | 'FUEL_TANK';
 
 export interface Building {
   x: number;
@@ -123,6 +126,9 @@ export class Terrain {
   private detailNoise: Noise2D;
   private forestNoise: Noise2D;
 
+  /** the southern ocean — coast, islands, harbour, naval routes */
+  sea!: Sea;
+
   /** river centreline */
   river: Vec2[] = [];
   /** seasonal tributary — dry streambed (visual + light cover) */
@@ -178,6 +184,7 @@ export class Terrain {
     this.baseNoise = new Noise2D(this.seed);
     this.detailNoise = new Noise2D((this.seed ^ 0x9e3779b9) >>> 0);
     this.forestNoise = new Noise2D((this.seed ^ 0x51ed2701) >>> 0);
+    this.sea = new Sea(this.seed, this.W, this.H);
     this.generate();
   }
 
@@ -225,6 +232,12 @@ export class Terrain {
       const t = 1 - dRiver / 170;
       h -= smooth01(t) * 11;
     }
+    // islands rise out of the bay — real ground for LOS and contours
+    for (const isl of this.sea.islands) {
+      h += this.gaussEl(x, y, isl.x, isl.y, isl.rx * 1.35, isl.ry * 1.35, isl.height);
+    }
+    // the sea floor is flat: the water surface carries the depth story
+    if (this.sea.isSea(x, y)) return 0;
     return Math.max(0, h);
   }
 
@@ -306,7 +319,17 @@ export class Terrain {
   riverWidth = 30;
 
   isWater(x: number, y: number): boolean {
-    return this.distToPolyline(x, y, this.river) < this.riverWidth * 0.5;
+    return this.distToPolyline(x, y, this.river) < this.riverWidth * 0.5 || this.sea.isSea(x, y);
+  }
+
+  /** signed distance from the shoreline (+ = seaward, metres) */
+  shoreDistAt(x: number, y: number): number {
+    return this.sea.shoreDistAt(x, y);
+  }
+
+  /** sea route for a hull of given draft (min shore clearance, m) */
+  findSeaPath(from: Vec2, to: Vec2, draft: number): Vec2[] {
+    return this.sea.findSeaPath(from, to, draft);
   }
 
   /** shallow ford — vehicles may wade across, slowly */
@@ -450,6 +473,33 @@ export class Terrain {
       { pts: fordTrack, major: false, name: 'FORD TRACK' },
     ];
 
+    // ── the littoral road — serves the shore batteries and the port ──
+    const coastRoad: Vec2[] = [
+      { x: 3080, y: 2015 }, // junction on the ford track
+      { x: 3130, y: 2170 },
+      { x: 3260, y: 2155 },
+      { x: 3400, y: 2125 },
+      { x: 3560, y: 2105 }, // runs on behind the cliffs
+    ];
+    const portSpur: Vec2[] = [
+      { x: 3380, y: 2130 }, // coast road junction
+      { x: 3345, y: 2195 }, // PORT VELIKY gate
+    ];
+    const zavodSpur: Vec2[] = [
+      { x: 3345, y: 2195 },
+      { x: 3330, y: 2020 },
+      { x: 3350, y: 1790 }, // ZAVOD 7 gate
+    ];
+    for (const pts of [coastRoad, portSpur, zavodSpur]) {
+      for (let i = 1; i < pts.length - 1; i++) {
+        pts[i].x += rng.range(-16, 16);
+        pts[i].y += rng.range(-14, 14);
+      }
+    }
+    this.roads.push({ pts: coastRoad, major: false, name: 'LITTORAL ROAD' });
+    this.roads.push({ pts: portSpur, major: false, name: 'PORT SPUR' });
+    this.roads.push({ pts: zavodSpur, major: false, name: 'WORKS SPUR' });
+
     // ── railway: west edge → across the river → ZAVOD 7 → east ──
     this.railway = [
       { x: -60, y: 1130 },
@@ -510,6 +560,20 @@ export class Terrain {
     // enemy HQ compound NE
     this.buildHQ(3440, 640, rng);
 
+    // ── PORT VELIKY — the harbour is a place, not a decal ────
+    if (this.sea.harbour) {
+      const hb = this.sea.harbour;
+      for (const wh of hb.warehouses) {
+        this.buildings.push({ x: wh.x, y: wh.y, w: wh.w, h: wh.h, rot: wh.rot, kind: 'WAREHOUSE' });
+      }
+      for (const tk of hb.tanks) {
+        this.buildings.push({ x: tk.x, y: tk.y, w: 13, h: 13, rot: 0, kind: 'FUEL_TANK' });
+      }
+      // harbour master + checkpoint on the gate
+      this.buildings.push({ x: 3318, y: 2212, w: 12, h: 9, rot: 0.3, kind: 'SHED' });
+      this.buildings.push({ x: 3372, y: 2200, w: 10, h: 6, rot: -0.2, kind: 'CHECKPOINT' });
+    }
+
     // checkpoint at the town bridge approach
     this.buildings.push({ x: 2136, y: 1802, w: 10, h: 6, rot: 0.9, kind: 'CHECKPOINT' });
     this.buildings.push({ x: 2148, y: 1790, w: 7, h: 5, rot: 0.4, kind: 'BUNKER' });
@@ -519,7 +583,7 @@ export class Terrain {
       [900, 1400],
       [1450, 2450],
       [2750, 1450],
-      [3250, 2150],
+      [3210, 2050],
       [1750, 900],
       [2350, 2760],
     ];
@@ -609,6 +673,7 @@ export class Terrain {
         if (this.slopeAt(fx, fy) > 0.085) continue;
         if (this.forestDensity(fx, fy) > 0.3) continue;
         if (this.distToPolyline(fx, fy, this.river) < 90) continue;
+        if (this.sea.shoreDistAt(fx, fy) > -60) continue; // the sea takes no farmland
         if (this.railFactor(fx, fy) > 0.05) continue;
         if (this.buildingAt(fx, fy, Math.max(fw, fh) * 0.7 + 30)) continue;
         let nearRoad = false;
@@ -691,6 +756,13 @@ export class Terrain {
       { x: 3400, y: 2400, text: 'VYSOKA POLJANA', size: 20 },
       { x: 1900, y: 2650, text: 'SOUTH FARMS', size: 18 },
       { x: 500, y: 1070, text: 'RAIL LINE', size: 14 },
+      // ── the sea ──
+      { x: 3330, y: 2185, text: 'PORT VELIKY', size: 20, bold: true },
+      { x: 3300, y: 2670, text: 'OSTROV BOLSHOY', size: 16 },
+      { x: 3560, y: 2620, text: 'VELIKIY BAY', size: 24, bold: true },
+      { x: 3235, y: 2430, text: 'THE NARROWS', size: 14 },
+      { x: 3940, y: 2900, text: 'APPROACHES', size: 15 },
+      { x: 3860, y: 2455, text: 'KAMEN', size: 13 },
     ];
     this.hillPeak = { x: 2950, y: 1180 };
     this.hillHeight = this.heightAt(2950, 1180);
@@ -1506,6 +1578,8 @@ export function buildingHpFor(kind: BuildingKind): number {
     case 'SUBSTATION': return 80;
     case 'CHECKPOINT': return 50;
     case 'RUIN': return 60;
+    case 'WAREHOUSE': return 200;
+    case 'FUEL_TANK': return 85;
     default: return 120;
   }
 }

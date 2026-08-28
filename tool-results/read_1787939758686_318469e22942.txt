@@ -1,0 +1,1112 @@
+     1→// ─────────────────────────────────────────────────────────────
+     2→// PAPER STORM · unit simulation
+     3→// Movement, pathfinding, turrets, weapons, aircraft sorties.
+     4→// ─────────────────────────────────────────────────────────────
+     5→
+     6→import { UNIT_DEFS, UnitDef, UnitType } from './unitDefs';
+     7→import type { Faction, IntelState, Order, UnitActivity, Controller } from '../core/types';
+     8→import { Vec2, clamp, dist, angleOf, angDiff, rotateToward, RNG } from '../core/math';
+     9→import type { Terrain } from '../world/terrain';
+    10→import type { EffectsSystem } from './effects';
+    11→import type { ProjectileSystem } from './projectiles';
+    12→import type { AudioEngine } from '../audio/audio';
+    13→import type { InkEconomy } from '../systems/economy';
+    14→import type { ObstacleSystem } from '../systems/obstacles';
+    15→import { coverFrom, findCoverSpot } from '../systems/cover';
+    16→import { gridString } from '../core/math';
+    17→
+    18→export interface SimContext {
+    19→  units: Unit[];
+    20→  terrain: Terrain;
+    21→  effects: EffectsSystem;
+    22→  projectiles: ProjectileSystem;
+    23→  audio: AudioEngine;
+    24→  economy: InkEconomy;
+    25→  obstacles: ObstacleSystem;
+    26→  time: number;
+    27→  rng: RNG;
+    28→  log: (text: string, level?: 'info' | 'contact' | 'alert' | 'objective' | 'economy') => void;
+    29→}
+    30→
+    31→export type AirState = 'STANDBY' | 'INBOUND' | 'PATROL' | 'RTB' | 'REARM' | 'DOWN';
+    32→
+    33→let NEXT_ID = 1;
+    34→
+    35→export class Unit {
+    36→  id = NEXT_ID++;
+    37→  def: UnitDef;
+    38→  faction: Faction;
+    39→  callsign: string;
+    40→
+    41→  x: number;
+    42→  y: number;
+    43→  angle = -Math.PI / 2;
+    44→  turretAngle = 0;
+    45→  radarAngle = 0;
+    46→  hp: number;
+    47→  ammo: number;
+    48→  dead = false;
+    49→
+    50→  // movement
+    51→  path: Vec2[] = [];
+    52→  dest: Vec2 | null = null;
+    53→  speedNow = 0;
+    54→  stuckT = 0;
+    55→
+    56→  // combat
+    57→  target: Unit | null = null;
+    58→  reloadT = 0;
+    59→  burstLeft = 0;
+    60→  burstT = 0;
+    61→  visibleTargets: Unit[] = [];
+    62→  fireMissionLeft = 0;
+    63→  fireMissionArea: Vec2 | null = null;
+    64→  /** artillery target being tracked for corrected fire */
+    65→  artyTrack: Unit | null = null;
+    66→  /** last unit that fired on us — drives cover-seeking */
+    67→  lastAttacker: Unit | null = null;
+    68→  lastAttackedT = -999;
+    69→
+    70→  // ── suppression: the stress of being shot at ──
+    71→  suppression = 0;
+    72→  private supSeekCooldown = 0;
+    73→  private standoffCheckT = 0;
+    74→  private reconCheckT = 0;
+    75→
+    76→  /** interrupted mission while sheltering from fire */
+    77→  coverDivert: { resumeOrder: Order; until: number } | null = null;
+    78→  /** the cover position we are sheltering at */
+    79→  coverPos: Vec2 | null = null;
+    80→
+    81→  // orders
+    82→  order: Order = { type: 'HOLD' };
+    83→  stance: 'AGGRESSIVE' | 'HOLD' = 'AGGRESSIVE';
+    84→  defendPos: Vec2 | null = null;
+    85→
+    86→  // intel (enemy units as seen by the player)
+    87→  intel: IntelState = 'HIDDEN';
+    88→  lastSeen = -999;
+    89→  knownX = 0;
+    90→  knownY = 0;
+    91→
+    92→  // factories
+    93→  factoryId: string | null = null;
+    94→  factoryCtl: Controller = 'ENEMY';
+    95→  captureT = 0;
+    96→  capturing: Controller | null = null;
+    97→
+    98→  // deployment
+    99→  isReinforcement = false;
+   100→
+   101→  // aircraft
+   102→  airState: AirState = 'STANDBY';
+   103→  patrol: Vec2 = { x: 2048, y: 1536 };
+   104→  orbitDir = 1;
+   105→  bank = 0;
+   106→  rearmT = 0;
+   107→  entryUsed = false;
+   108→  /** committed attack run state */
+   109→  runPhase: 'ORBIT' | 'INGRESS' | 'EGRESS' = 'ORBIT';
+   110→  runTarget: Unit | null = null;
+   111→  egressT = 0;
+   112→
+   113→  // fx
+   114→  recoil = 0;
+   115→  dustT = 0;
+   116→  trackDist = 0;
+   117→  lastFireT = -999;
+   118→  damageFlash = 0;
+   119→
+   120→  rng: RNG;
+   121→
+   122→  constructor(type: UnitType, faction: Faction, x: number, y: number, callsign: string, seedBase: number) {
+   123→    this.def = UNIT_DEFS[type];
+   124→    this.faction = faction;
+   125→    this.x = x;
+   126→    this.y = y;
+   127→    this.callsign = callsign;
+   128→    this.hp = this.def.hp;
+   129→    this.ammo = this.def.ammo;
+   130→    this.turretAngle = this.angle;
+   131→    this.rng = new RNG((seedBase + this.id * 7919) >>> 0);
+   132→    if (this.def.isAir) {
+   133→      this.airState = 'STANDBY';
+   134→    }
+   135→  }
+   136→
+   137→  get isAir(): boolean {
+   138→    return this.def.isAir;
+   139→  }
+   140→
+   141→  // ── orders ─────────────────────────────────────────────────
+   142→
+   143→  orderMove(dest: Vec2, ctx: SimContext) {
+   144→    this.order = { type: 'MOVE', pos: dest };
+   145→    this.dest = { ...dest };
+   146→    this.fireMissionLeft = 0;
+   147→    this.fireMissionArea = null;
+   148→    this.path = ctx.terrain.findPath({ x: this.x, y: this.y }, dest);
+   149→    this.pathIndexStart();
+   150→  }
+   151→
+   152→  orderAttackMove(dest: Vec2, ctx: SimContext) {
+   153→    this.order = { type: 'ATTACK_MOVE', pos: dest };
+   154→    this.dest = { ...dest };
+   155→    this.path = ctx.terrain.findPath({ x: this.x, y: this.y }, dest);
+   156→    this.pathIndexStart();
+   157→  }
+   158→
+   159→  orderAttack(target: Unit, ctx: SimContext) {
+   160→    this.order = { type: 'ATTACK', targetId: target.id };
+   161→    this.target = target;
+   162→    this.fireMissionLeft = 0;
+   163→    this.fireMissionArea = null;
+   164→    if (!this.isAir && this.def.projectile !== 'ARTY') {
+   165→      // close to weapon range
+   166→      this.approachTarget(target, ctx);
+   167→    }
+   168→  }
+   169→
+   170→  orderStop() {
+   171→    this.order = { type: 'STOP' };
+   172→    this.path = [];
+   173→    this.dest = null;
+   174→    this.fireMissionLeft = 0;
+   175→    this.fireMissionArea = null;
+   176→    this.coverDivert = null;
+   177→    this.speedNow = 0;
+   178→  }
+   179→
+   180→  orderHold() {
+   181→    this.order = { type: 'HOLD' };
+   182→    this.path = [];
+   183→    this.dest = null;
+   184→    this.fireMissionLeft = 0;
+   185→    this.fireMissionArea = null;
+   186→    this.coverDivert = null;
+   187→  }
+   188→
+   189→  orderFireMission(area: Vec2) {
+   190→    this.order = { type: 'FIRE_MISSION', area };
+   191→    this.fireMissionLeft = 6;
+   192→    this.fireMissionArea = { ...area };
+   193→    this.path = [];
+   194→    this.dest = null;
+   195→  }
+   196→
+   197→  orderPatrol(pos: Vec2) {
+   198→    if (this.isAir) {
+   199→      this.patrol = { ...pos };
+   200→    }
+   201→  }
+   202→
+   203→  private approachTarget(target: Unit, ctx: SimContext) {
+   204→    const d = dist(this.x, this.y, target.x, target.y);
+   205→    if (d > this.def.range * 0.85) {
+   206→      const t = 0.8;
+   207→      const px = this.x + (target.x - this.x) * t;
+   208→      const py = this.y + (target.y - this.y) * t;
+   209→      this.path = ctx.terrain.findPath({ x: this.x, y: this.y }, { x: px, y: py });
+   210→      this.dest = { x: px, y: py };
+   211→      this.pathIndexStart();
+   212→    }
+   213→  }
+   214→
+   215→  private pathIndexStart() {
+   216→    // drop the first waypoint if it is behind us
+   217→    if (this.path.length > 1) {
+   218→      const a = this.path[0];
+   219→      const b = this.path[1];
+   220→      const toB = angleOf(b.x - this.x, b.y - this.y);
+   221→      const toA = angleOf(a.x - this.x, a.y - this.y);
+   222→      if (Math.abs(angDiff(toA, toB)) > Math.PI * 0.6) this.path.shift();
+   223→    }
+   224→  }
+   225→
+   226→  // ── main update ────────────────────────────────────────────
+   227→
+   228→  update(dt: number, ctx: SimContext) {
+   229→    if (this.dead) return;
+   230→    if (this.def.kind === 'FACTORY') {
+   231→      // static structure — no movement, no weapons
+   232→      this.damageFlash = Math.max(0, this.damageFlash - dt * 3);
+   233→      return;
+   234→    }
+   235→    this.reloadT -= dt;
+   236→    this.damageFlash = Math.max(0, this.damageFlash - dt * 3);
+   237→    this.recoil = Math.max(0, this.recoil - dt * 8);
+   238→    if (this.def.kind === 'SPAA') this.radarAngle += dt * 1.35;
+   239→
+   240→    // suppression decays — troops recover their nerve
+   241→    this.suppression = Math.max(0, this.suppression - dt * 0.065);
+   242→    this.supSeekCooldown -= dt;
+   243→    this.standoffCheckT -= dt;
+   244→    this.reconCheckT -= dt;
+   245→
+   246→    if (this.isAir) {
+   247→      this.updateAir(dt, ctx);
+   248→      return;
+   249→    }
+   250→
+   251→    this.updateRoleBehavior(dt, ctx);
+   252→    this.updateGroundMovement(dt, ctx);
+   253→    // the world is solid EVERY frame — not just while driving. A
+   254→    // wreck dropped on a holding unit, a collapsed wall, a boulder
+   255→    // pocket: arriving somewhere is no licence to intersect matter.
+   256→    if (ctx.obstacles && this.def.kind !== 'HQ') {
+   257→      const hit = ctx.obstacles.resolve(this, dt, ctx);
+   258→      if (hit.slow < 1) this.speedNow *= hit.slow;
+   259→      if (hit.crushed) this.suppression = Math.min(1, this.suppression + 0.02);
+   260→    }
+   261→    this.updateTargeting(dt, ctx);
+   262→    this.updateFiring(dt, ctx);
+   263→    this.updateSurfaceFx(dt, ctx);
+   264→  }
+   265→
+   266→  get pinned(): boolean {
+   267→    return this.suppression > 0.85;
+   268→  }
+   269→
+   270→  /** aim quality multiplier — everything tactical converges here */
+   271→  accuracyVs(t: Unit, ctx: SimContext): number {
+   272→    let m = 1;
+   273→    // firing on the move degrades gunnery
+   274→    if (this.speedNow > this.def.speed * 0.25) m *= 0.72;
+   275→    // a suppressed crew flinches
+   276→    m *= 1 - 0.45 * this.suppression;
+   277→    // high ground observes better
+   278→    const dh = ctx.terrain.heightAt(this.x, this.y) - ctx.terrain.heightAt(t.x, t.y);
+   279→    if (dh > 10) m *= 1.15;
+   280→    else if (dh < -10) m *= 0.9;
+   281→    // target movement
+   282→    if (t.speedNow > t.def.speed * 0.5) m *= 0.82;
+   283→    else if (t.speedNow < 0.5) m *= 1.08;
+   284→    // cover on the target — the decisive factor
+   285→    const cov = coverFrom(ctx, t.x, t.y, this.x, this.y);
+   286→    m *= 1 - cov.value;
+   287→    return clamp(m, 0.12, 1.25);
+   288→  }
+   289→
+   290→  /** roles behave like they want to survive */
+   291→  private updateRoleBehavior(dt: number, ctx: SimContext) {
+   292→    void dt;
+   293→    // artillery keeps distance from the fight
+   294→    if (this.def.kind === 'SPG' && this.standoffCheckT <= 0) {
+   295→      this.standoffCheckT = 4 + this.rng.range(0, 2);
+   296→      let nearest: Unit | null = null;
+   297→      let nd = Infinity;
+   298→      for (const u of ctx.units) {
+   299→        if (u.dead || u.faction === this.faction || u.isAir) continue;
+   300→        const d = dist(this.x, this.y, u.x, u.y);
+   301→        if (d < nd) {
+   302→          nd = d;
+   303→          nearest = u;
+   304→        }
+   305→      }
+   306→      if (nearest && nd < 750 && this.fireMissionLeft <= 0) {
+   307→        const away = angleOf(this.x - nearest.x, this.y - nearest.y);
+   308→        const dest = {
+   309→          x: clamp(this.x + Math.cos(away) * 620, 100, ctx.terrain.W - 100),
+   310→          y: clamp(this.y + Math.sin(away) * 620, 100, ctx.terrain.H - 100),
+   311→        };
+   312→        this.orderMove(dest, ctx);
+   313→        ctx.log(`${this.callsign} · DISPLACING — ENEMY INSIDE GUN RANGE`, 'alert');
+   314→      }
+   315→    }
+   316→
+   317→    // reconnaissance survives to scout again
+   318→    if (this.def.kind === 'REC' && this.reconCheckT <= 0) {
+   319→      this.reconCheckT = 3 + this.rng.range(0, 2);
+   320→      let threat = 0;
+   321→      let nearest: Unit | null = null;
+   322→      let nd = Infinity;
+   323→      for (const u of ctx.units) {
+   324→        if (u.dead || u.faction === this.faction || u.isAir) continue;
+   325→        if (u.def.kind === 'FACTORY' || u.def.kind === 'HQ') continue;
+   326→        const d = dist(this.x, this.y, u.x, u.y);
+   327→        if (d < 900) threat++;
+   328→        if (d < nd) {
+   329→          nd = d;
+   330→          nearest = u;
+   331→        }
+   332→      }
+   333→      const outnumbered = threat >= 2 && nearest && nd < 520;
+   334→      // a player-given move order is respected — the scout flinches only
+   335→      // when idle, or when it is genuinely fighting for its life
+   336→      const executingOrder = (this.order.type === 'MOVE' || this.order.type === 'ATTACK_MOVE') && this.path.length > 0;
+   337→      const mustBreak = this.hp < this.def.hp * 0.55 || (outnumbered && !executingOrder);
+   338→      if (mustBreak && threat > 0) {
+   339→        // fall back toward the nearest friendly armoured unit
+   340→        let haven: Unit | null = null;
+   341→        let hd = Infinity;
+   342→        for (const u of ctx.units) {
+   343→          if (u.dead || u.faction !== this.faction || u.isAir) continue;
+   344→          if (u.def.kind !== 'MBT' && u.def.kind !== 'IFV') continue;
+   345→          const d = dist(this.x, this.y, u.x, u.y);
+   346→          if (d < hd) {
+   347→            hd = d;
+   348→            haven = u;
+   349→          }
+   350→        }
+   351→        if (haven && hd > 140) {
+   352→          const away = angleOf(haven.x - this.x, haven.y - this.y);
+   353→          this.orderMove(
+   354→            { x: haven.x + Math.cos(away) * 40, y: haven.y + Math.sin(away) * 40 },
+   355→            ctx
+   356→          );
+   357→          ctx.log(`${this.callsign} · WITHDRAWING UNDER PRESSURE`, 'alert');
+   358→        }
+   359→      }
+   360→    }
+   361→
+   362→    // under fire: survival instinct. Both factions. Roles differ:
+   363→    // guns displace, scouts withdraw — everyone else gets behind
+   364→    // something solid and keeps fighting from there.
+   365→    if (
+   366→      this.suppression > 0.35 &&
+   367→      this.supSeekCooldown <= 0 &&
+   368→      this.lastAttacker &&
+   369→      !this.lastAttacker.dead &&
+   370→      ctx.time - this.lastAttackedT < 14 &&
+   371→      this.def.kind !== 'SPG' &&
+   372→      this.def.kind !== 'REC' &&
+   373→      this.def.kind !== 'FACTORY'
+   374→    ) {
+   375→      const threat = this.lastAttacker;
+   376→      const holding =
+   377→        (this.order.type === 'HOLD' || this.order.type === 'STOP' || this.coverDivert !== null) &&
+   378→        this.path.length === 0;
+   379→      const executing =
+   380→        (this.order.type === 'MOVE' || this.order.type === 'ATTACK_MOVE') && this.path.length > 0;
+   381→      // an assault pushes on unless the fire is genuinely withering —
+   382→      // a scripted robot dives for every wall; a crew weighs the trade
+   383→      const movingThreshold = this.order.type === 'ATTACK_MOVE' ? 0.62 : 0.42;
+   384→      const wantFlinch = holding || (executing && this.suppression > movingThreshold);
+   385→      if (wantFlinch) {
+   386→        this.supSeekCooldown = 7;
+   387→        const spot = findCoverSpot(ctx, this.x, this.y, threat.x, threat.y, 120);
+   388→        if (spot && spot.protect > 0.3) {
+   389→          const current = coverFrom(ctx, this.x, this.y, threat.x, threat.y);
+   390→          if (spot.protect > current.value + 0.15) {
+   391→            this.coverPos = { x: spot.x, y: spot.y };
+   392→            if (executing && !this.coverDivert) {
+   393→              // remember the mission — we will finish it when the fire slackens
+   394→              this.coverDivert = { resumeOrder: this.order, until: ctx.time + 20 };
+   395→              ctx.log(`${this.callsign} · TAKING COVER — MISSION PAUSED`, 'alert');
+   396→            }
+   397→            this.path = [{ x: spot.x, y: spot.y }];
+   398→            this.dest = { x: spot.x, y: spot.y };
+   399→          }
+   400→        }
+   401→      }
+   402→    }
+   403→
+   404→    // the fire slackened, or the clock ran out — back to the mission
+   405→    if (this.coverDivert) {
+   406→      const done =
+   407→        this.suppression < 0.12 ||
+   408→        ctx.time > this.coverDivert.until ||
+   409→        !this.lastAttacker ||
+   410→        this.lastAttacker.dead ||
+   411→        ctx.time - this.lastAttackedT > 16;
+   412→      if (done) {
+   413→        const resume = this.coverDivert.resumeOrder;
+   414→        this.coverDivert = null;
+   415→        this.coverPos = null;
+   416→        if ((resume.type === 'MOVE' || resume.type === 'ATTACK_MOVE') && resume.pos) {
+   417→          if (resume.type === 'MOVE') this.orderMove({ ...resume.pos }, ctx);
+   418→          else this.orderAttackMove({ ...resume.pos }, ctx);
+   419→          ctx.log(`${this.callsign} · RESUMING MOVE`, 'info');
+   420→        }
+   421→      }
+   422→    } else if (this.coverPos && this.path.length === 0) {
+   423→      this.coverPos = null;
+   424→    }
+   425→  }
+   426→
+   427→  // ── ground movement ────────────────────────────────────────
+   428→
+   429→  private updateGroundMovement(dt: number, ctx: SimContext) {
+   430→    // ATTACK order: keep approaching if target far
+   431→    if (this.order.type === 'ATTACK' && this.target && !this.target.dead) {
+   432→      const d = dist(this.x, this.y, this.target.x, this.target.y);
+   433→      if (d > this.def.range * 0.9 && (this.path.length === 0 || !this.dest)) {
+   434→        this.approachTarget(this.target, ctx);
+   435→      }
+   436→      if (d < this.def.range * 0.55 && this.stance === 'HOLD') {
+   437→        this.path = [];
+   438→        this.dest = null;
+   439→      }
+   440→    }
+   441→    // FIRE_MISSION: hold position
+   442→    if (this.order.type === 'FIRE_MISSION') {
+   443→      this.path = [];
+   444→      this.dest = null;
+   445→    }
+   446→
+   447→    if (this.path.length === 0) {
+   448→      // decelerate
+   449→      this.speedNow = Math.max(0, this.speedNow - dt * this.def.speed * 1.6);
+   450→      // rotate turret home slowly
+   451→      if (!this.target) {
+   452→        this.turretAngle = rotateToward(this.turretAngle, this.angle, this.def.turretRate * 0.35 * dt);
+   453→      }
+   454→      return;
+   455→    }
+   456→
+   457→    const wp = this.path[0];
+   458→    const d = dist(this.x, this.y, wp.x, wp.y);
+   459→    const arriveR = this.path.length === 1 ? 5 : 14;
+   460→    if (d < arriveR) {
+   461→      this.path.shift();
+   462→      if (this.path.length === 0) {
+   463→        this.dest = null;
+   464→        this.speedNow = 0;
+   465→        this.isReinforcement = false;
+   466→      }
+   467→      return;
+   468→    }
+   469→
+   470→    const desired0 = angleOf(wp.x - this.x, wp.y - this.y);
+   471→    // steer around physical matter — boulders, buildings, wrecks
+   472→    let desired = desired0;
+   473→    if (ctx.obstacles) {
+   474→      const avoid = ctx.obstacles.avoidSteer(this);
+   475→      if (avoid !== 0) desired = desired0 + avoid * 0.55;
+   476→    }
+   477→    const diff = angDiff(this.angle, desired);
+   478→    const turnCap = this.def.turnRate * dt;
+   479→    this.angle = rotateToward(this.angle, desired, turnCap);
+   480→
+   481→    // slow down on sharp turns
+   482→    const turnFactor = 1 - clamp(Math.abs(diff) / Math.PI, 0, 1) * 0.75;
+   483→    // terrain speed
+   484→    let terr = 1;
+   485→    const forest = ctx.terrain.forestDensity(this.x, this.y);
+   486→    if (forest > 0.42) terr *= 0.58;
+   487→    const slope = ctx.terrain.slopeAt(this.x, this.y);
+   488→    terr *= 1 / (1 + slope * 2.6);
+   489→    const road = ctx.terrain.roadFactor(this.x, this.y);
+   490→    if (road > 0.3) terr *= 1.25;
+   491→
+   492→    const targetSpeed =
+   493→      this.def.speed * turnFactor * clamp(terr, 0.3, 1.35) * (1 - 0.35 * this.suppression) * (this.pinned ? 0.5 : 1);
+   494→    this.speedNow += clamp(targetSpeed - this.speedNow, -this.def.speed * 2 * dt, this.def.speed * 1.4 * dt);
+   495→
+   496→    const step = this.speedNow * dt;
+   497→    this.x += Math.cos(this.angle) * step;
+   498→    this.y += Math.sin(this.angle) * step;
+   499→
+   500→    // separation from nearby units — vehicles keep fighting distance
+   501→    for (const o of ctx.units) {
+   502→      if (o === this || o.dead || o.isAir) continue;
+   503→      const od = dist(this.x, this.y, o.x, o.y);
+   504→      const heavy = this.def.kind === 'MBT' || o.def.kind === 'MBT';
+   505→      const minD = (this.def.length + o.def.length) * 0.42 + (heavy ? 20 : 12);
+   506→      if (od < minD && od > 0.01) {
+   507→        const push = ((minD - od) / minD) * 30 * dt;
+   508→        const a = angleOf(this.x - o.x, this.y - o.y);
+   509→        this.x += Math.cos(a) * push;
+   510→        this.y += Math.sin(a) * push;
+   511→      }
+   512→    }
+   513→
+   514→    // stuck detection: nudge sideways
+   515→    if (this.speedNow < 0.6 && this.path.length > 0) {
+   516→      this.stuckT += dt;
+   517→      if (this.stuckT > 2.4) {
+   518→        this.stuckT = 0;
+   519→        const side = this.rng.chance(0.5) ? 1 : -1;
+   520→        this.angle += side * 0.7;
+   521→        this.x += Math.cos(this.angle) * 3;
+   522→        this.y += Math.sin(this.angle) * 3;
+   523→      }
+   524→    } else {
+   525→      this.stuckT = 0;
+   526→    }
+   527→
+   528→    this.x = clamp(this.x, 20, ctx.terrain.W - 20);
+   529→    this.y = clamp(this.y, 20, ctx.terrain.H - 20);
+   530→  }
+   531→
+   532→  // ── targeting ──────────────────────────────────────────────
+   533→
+   534→  private updateTargeting(dt: number, ctx: SimContext) {
+   535→    void dt;
+   536→    // validate current target
+   537→    if (this.target && (this.target.dead || !this.sees(this.target))) {
+   538→      this.target = null;
+   539→    }
+   540→    // pick new target from currently visible enemies
+   541→    if (!this.target || this.target.dead) {
+   542→      let best: Unit | null = null;
+   543→      let bestScore = -Infinity;
+   544→      for (const u of this.visibleTargets) {
+   545→        if (u.dead || u.faction === this.faction) continue;
+   546→        // factories are engaged on explicit order only — no one wastes
+   547→        // main gun rounds on empty halls by accident
+   548→        if (u.def.kind === 'FACTORY') continue;
+   549→        let s = 100 - dist(this.x, this.y, u.x, u.y) / 30;
+   550→        // role preferences
+   551→        if (this.def.kind === 'MBT') s += u.def.kind === 'MBT' ? 24 : u.def.kind === 'SPAA' ? 30 : 0;
+   552→        if (this.def.kind === 'IFV' || this.def.kind === 'REC') s += u.def.kind === 'REC' ? 18 : u.def.kind === 'IFV' ? 10 : 0;
+   553→        if (this.def.kind === 'SPAA') continue; // air defence does not engage ground
+   554→        if (u.isAir && !this.def.canHitAir) continue;
+   555→        if (s > bestScore) {
+   556→          bestScore = s;
+   557→          best = u;
+   558→        }
+   559→      }
+   560→      if (best) this.target = best;
+   561→    }
+   562→    // turret
+   563→    if (this.target) {
+   564→      const lead = this.def.projectile === 'SHELL' ? this.leadAngle(this.target, 470) : angleOf(this.target.x - this.x, this.target.y - this.y);
+   565→      this.turretAngle = rotateToward(this.turretAngle, lead, this.def.turretRate * (1 - 0.5 * this.suppression) * dt);
+   566→    }
+   567→  }
+   568→
+   569→  private leadAngle(target: Unit, projSpeed: number): number {
+   570→    const d = dist(this.x, this.y, target.x, target.y);
+   571→    const t = d / projSpeed;
+   572→    const px = target.x + Math.cos(target.angle) * target.speedNow * t;
+   573→    const py = target.y + Math.sin(target.angle) * target.speedNow * t;
+   574→    return angleOf(px - this.x, py - this.y);
+   575→  }
+   576→
+   577→  sees(u: Unit): boolean {
+   578→    return this.visibleTargets.includes(u);
+   579→  }
+   580→
+   581→  // ── firing ─────────────────────────────────────────────────
+   582→
+   583→  private updateFiring(dt: number, ctx: SimContext) {
+   584→    // artillery fire missions (player-directed or AI-directed)
+   585→    if (this.def.projectile === 'ARTY') {
+   586→      if (this.fireMissionArea && this.fireMissionLeft > 0 && this.reloadT <= 0 && this.ammo > 0 && this.speedNow < 0.6) {
+   587→        let ax = this.fireMissionArea.x;
+   588→        let ay = this.fireMissionArea.y;
+   589→        let quality = 1; // dispersion multiplier — lower is better
+   590→        // corrected fire on a tracked target: live observation tightens the salvo
+   591→        if (this.artyTrack && !this.artyTrack.dead) {
+   592→          const observed = this.artyTrack.faction === 'ENEMY'
+   593→            ? this.artyTrack.intel === 'DETECTED'
+   594→            : ctx.units.some(
+   595→                (u) => u.faction === 'ENEMY' && !u.dead && u.visibleTargets.includes(this.artyTrack!)
+   596→              );
+   597→          if (observed) {
+   598→            ax = this.artyTrack.x;
+   599→            ay = this.artyTrack.y;
+   600→            quality = 0.85;
+   601→            if (this.artyTrack.speedNow > 2) quality *= 1.6; // a moving target slips the bracket
+   602→          } else {
+   603→            ax = this.artyTrack.knownX;
+   604→            ay = this.artyTrack.knownY;
+   605→            quality = 2.4;
+   606→            if (ctx.time - this.artyTrack.lastSeen > 30) this.artyTrack = null;
+   607→          }
+   608→        } else {
+   609→          // area fire — is anyone observing the target area?
+   610→          const observed = ctx.units.some(
+   611→            (u) =>
+   612→              !u.dead &&
+   613→              u.faction === this.faction &&
+   614→              !u.isAir &&
+   615→              dist(u.x, u.y, ax, ay) < Math.max(600, u.def.vision * 0.65) &&
+   616→              ctx.terrain.losClear(u.x, u.y, ctx.terrain.heightAt(u.x, u.y) + 4.5, ax, ay, ctx.terrain.heightAt(ax, ay) + 3)
+   617→          );
+   618→          quality = observed ? 1.35 : 4.0;
+   619→        }
+   620→        // shooter state widens the bracket
+   621→        if (this.suppression > 0.3) quality *= 1 + (this.suppression - 0.3);
+   622→        if (this.hp < this.def.hp * 0.5) quality *= 1.3;
+   623→        // distance tells
+   624→        const dFire = dist(this.x, this.y, ax, ay);
+   625→        quality *= 1 + (dFire - 800) / 8000;
+   626→
+   627→        ctx.projectiles.fireArtillery(ctx, this, ax, ay, this.def.damage, this.def.splash, quality);
+   628→        this.ammo--;
+   629→        this.fireMissionLeft--;
+   630→        this.reloadT = this.def.reload;
+   631→        this.recoil = 1.4;
+   632→        this.lastFireT = ctx.time;
+   633→        if (this.fireMissionLeft === 0) {
+   634→          ctx.log(`${this.callsign} · FIRE MISSION COMPLETE`);
+   635→          this.fireMissionArea = null;
+   636→          this.artyTrack = null;
+   637→        }
+   638→        if (this.ammo === 0) ctx.log(`${this.callsign} · AMMUNITION EXPENDED`, 'alert');
+   639→      }
+   640→      return;
+   641→    }
+   642→
+   643→    // burst weapons
+   644→    if (this.burstLeft > 0) {
+   645→      this.burstT -= dt;
+   646→      if (this.burstT <= 0 && this.target && !this.target.dead) {
+   647→        this.burstT = this.def.burstInterval;
+   648→        this.burstLeft--;
+   649→        ctx.projectiles.fireAuto(ctx, this, this.target.x, this.target.y, this.def.damage, this.accuracyVs(this.target, ctx));
+   650→        this.ammo--;
+   651→        this.recoil = 0.4;
+   652→        this.lastFireT = ctx.time;
+   653→        if (this.ammo <= 0) {
+   654→          this.burstLeft = 0;
+   655→          ctx.log(`${this.callsign} · AMMUNITION EXPENDED`, 'alert');
+   656→        }
+   657→      }
+   658→      return;
+   659→    }
+   660→
+   661→    if (!this.target || this.target.dead || this.reloadT > 0 || this.ammo <= 0) return;
+   662→    // a pinned crew keeps its head down
+   663→    if (this.pinned && this.rng.chance(0.6)) return;
+   664→
+   665→    const d = dist(this.x, this.y, this.target.x, this.target.y);
+   666→    if (d > this.def.range || d < this.def.minRange) return;
+   667→    if (this.target.isAir && !this.def.canHitAir) return;
+   668→
+   669→    const aimAngle = this.def.projectile === 'SHELL' ? this.leadAngle(this.target, 470) : angleOf(this.target.x - this.x, this.target.y - this.y);
+   670→    const aligned = Math.abs(angDiff(this.turretAngle, aimAngle));
+   671→
+   672→    if (this.def.projectile === 'AUTO') {
+   673→      if (aligned < 0.14) {
+   674→        this.burstLeft = this.def.burst;
+   675→        this.burstT = 0;
+   676→        this.reloadT = this.def.reload;
+   677→      }
+   678→    } else if (this.def.projectile === 'SHELL') {
+   679→      if (aligned < 0.05) {
+   680→        const acc = this.accuracyVs(this.target, ctx);
+   681→        ctx.projectiles.fireShell(ctx, this, this.target.x, this.target.y, this.def.damage, this.def.accuracy * acc);
+   682→        this.ammo--;
+   683→        this.reloadT = this.def.reload;
+   684→        this.recoil = 1.0;
+   685→        this.lastFireT = ctx.time;
+   686→        if (this.ammo <= 0) ctx.log(`${this.callsign} · AMMUNITION EXPENDED`, 'alert');
+   687→      }
+   688→    } else if (this.def.projectile === 'MISSILE_SPAA') {
+   689→      if (aligned < 0.2 && this.target.isAir) {
+   690→        ctx.projectiles.fireSAM(ctx, this, this.target, this.def.damage);
+   691→        this.ammo--;
+   692→        this.reloadT = this.def.reload;
+   693→        this.recoil = 0.6;
+   694→        if (this.ammo <= 0) ctx.log(`ENEMY AD · SALVO EXHAUSTED`, 'info');
+   695→      }
+   696→    }
+   697→  }
+   698→
+   699→  // ── surface fx: dust & tracks ──────────────────────────────
+   700→
+   701→  private updateSurfaceFx(dt: number, ctx: SimContext) {
+   702→    if (this.speedNow > this.def.speed * 0.45) {
+   703→      this.dustT -= dt;
+   704→      if (this.dustT <= 0) {
+   705→        this.dustT = 0.24;
+   706→        const back = angleOf(-Math.cos(this.angle), -Math.sin(this.angle));
+   707→        ctx.effects.spawnDust(
+   708→          this.x + Math.cos(this.angle) * -this.def.length * 0.45 + Math.cos(back) * 2,
+   709→          this.y + Math.sin(this.angle) * -this.def.length * 0.45 + Math.sin(back) * 2,
+   710→          Math.cos(back) * 4,
+   711→          Math.sin(back) * 4
+   712→        );
+   713→      }
+   714→      this.trackDist += this.speedNow * dt;
+   715→      if (this.trackDist > 3) {
+   716→        this.trackDist = 0;
+   717→        ctx.effects.stampTrack(this.x, this.y, this.angle, this.def.width * 0.9);
+   718→      }
+   719→    }
+   720→  }
+   721→
+   722→  // ── aircraft ───────────────────────────────────────────────
+   723→
+   724→  private updateAir(dt: number, ctx: SimContext) {
+   725→    const speed = this.def.speed;
+   726→
+   727→    switch (this.airState) {
+   728→      case 'STANDBY':
+   729→        this.rearmT -= dt;
+   730→        break;
+   731→
+   732→      case 'INBOUND':
+   733→      case 'PATROL': {
+   734→        const speed = this.def.speed;
+   735→
+   736→        // ── committed attack runs: dive, fire, egress, re-attack ──
+   737→        if (this.runPhase === 'EGRESS') {
+   738→          this.egressT -= dt;
+   739→          // fly through — the aircraft does not linger over the target
+   740→          const away = this.runTarget && !this.runTarget.dead ? angleOf(this.x - this.runTarget.x, this.y - this.runTarget.y) : this.angle;
+   741→          const desired = this.angle + angDiff(this.angle, away) * 0.22;
+   742→          const turn = clamp(angDiff(this.angle, desired), -this.def.turnRate * dt, this.def.turnRate * dt);
+   743→          this.angle += turn;
+   744→          this.bank = clamp(this.bank + (turn / (this.def.turnRate * dt || 1) - this.bank) * dt * 2.5, -1, 1);
+   745→          this.x += Math.cos(this.angle) * speed * dt;
+   746→          this.y += Math.sin(this.angle) * speed * dt;
+   747→          if (this.egressT <= 0) {
+   748→            this.runPhase = 'ORBIT';
+   749→            this.runTarget = null;
+   750→          }
+   751→          break;
+   752→        }
+   753→
+   754→        if (this.runPhase === 'INGRESS' && this.runTarget && !this.runTarget.dead) {
+   755→          // straight at the target — commitment
+   756→          const toT = angleOf(this.runTarget.x - this.x, this.runTarget.y - this.y);
+   757→          const diff = angDiff(this.angle, toT);
+   758→          const turn = clamp(diff, -this.def.turnRate * dt, this.def.turnRate * dt);
+   759→          this.angle += turn;
+   760→          this.bank = clamp(this.bank + (turn / (this.def.turnRate * dt || 1) - this.bank) * dt * 3, -1, 1);
+   761→          this.x += Math.cos(this.angle) * speed * dt;
+   762→          this.y += Math.sin(this.angle) * speed * dt;
+   763→          const dd = dist(this.x, this.y, this.runTarget.x, this.runTarget.y);
+   764→          if (dd < this.def.range && Math.abs(diff) < 0.35 && this.ammo > 0 && this.reloadT <= 0) {
+   765→            // weapons away — then get out
+   766→            ctx.projectiles.fireAGM(ctx, this, this.runTarget, this.def.damage, this.def.splash);
+   767→            this.ammo--;
+   768→            this.reloadT = this.def.reload;
+   769→            this.runPhase = 'EGRESS';
+   770→            this.egressT = 3.4 + this.rng.range(0, 1.6);
+   771→            if (this.ammo === 0) {
+   772→              ctx.log(`${this.callsign} · ORDnANCE EXPENDED — RTB`, 'info');
+   773→              this.airState = 'RTB';
+   774→              this.runPhase = 'ORBIT';
+   775→              this.runTarget = null;
+   776→            }
+   777→          } else if (dd > 2400 || (dd < 120 && Math.abs(diff) > 2.2)) {
+   778→            // overshoot — abort and reset
+   779→            this.runPhase = 'EGRESS';
+   780→            this.egressT = 2.6;
+   781→          }
+   782→          break;
+   783→        }
+   784→
+   785→        // orbit the patrol point
+   786→        const R = 640;
+   787→        const dx = this.x - this.patrol.x;
+   788→        const dy = this.y - this.patrol.y;
+   789→        const d = Math.hypot(dx, dy) || 1;
+   790→        const orbitA = angleOf(dx, dy);
+   791→        let desired: number;
+   792→        if (d > R * 1.6) {
+   793→          desired = angleOf(this.patrol.x - this.x, this.patrol.y - this.y);
+   794→        } else {
+   795→          // tangential heading, correct radius drift
+   796→          const radialErr = (d - R) / R;
+   797→          desired = orbitA + Math.PI / 2 * this.orbitDir + clamp(radialErr, -0.7, 0.7) * this.orbitDir;
+   798→        }
+   799→        const diff = angDiff(this.angle, desired);
+   800→        const turn = clamp(diff, -this.def.turnRate * dt, this.def.turnRate * dt);
+   801→        this.angle += turn;
+   802→        this.bank = clamp(this.bank + (turn / (this.def.turnRate * dt || 1) - this.bank) * dt * 3, -1, 1);
+   803→        this.x += Math.cos(this.angle) * speed * dt;
+   804→        this.y += Math.sin(this.angle) * speed * dt;
+   805→
+   806→        // arrive on station
+   807→        if (this.airState === 'INBOUND' && Math.hypot(this.x - this.patrol.x, this.y - this.patrol.y) < R * 1.6) {
+   808→          this.airState = 'PATROL';
+   809→        }
+   810→
+   811→        // pick a target and begin the dive
+   812→        if (this.ammo > 0 && this.reloadT <= 0 && (this.airState === 'PATROL' || this.airState === 'INBOUND')) {
+   813→          let best: Unit | null = null;
+   814→          let bd = Infinity;
+   815→          for (const u of this.visibleTargets) {
+   816→            if (u.dead || u.isAir || u.def.kind === 'FACTORY') continue;
+   817→            const dd = dist(this.x, this.y, u.x, u.y);
+   818→            if (dd < 1900 && dd < bd) {
+   819→              const toT = angleOf(u.x - this.x, u.y - this.y);
+   820→              // prefer targets roughly ahead
+   821→              const off = Math.abs(angDiff(this.angle, toT));
+   822→              const score = dd + off * 400;
+   823→              if (score < bd) {
+   824→                bd = score;
+   825→                best = u;
+   826→              }
+   827→            }
+   828→          }
+   829→          if (best) {
+   830→            this.runTarget = best;
+   831→            this.runPhase = 'INGRESS';
+   832→          }
+   833→        }
+   834→        if (this.hp < this.def.hp * 0.4 && this.airState === 'PATROL') {
+   835→          ctx.log(`${this.callsign} · AIRFRAME CRITICAL — RTB`, 'alert');
+   836→          this.airState = 'RTB';
+   837→        }
+   838→        // despawn when far off map
+   839→        if (this.x < -300 || this.y < -300 || this.x > ctx.terrain.W + 300 || this.y > ctx.terrain.H + 300) {
+   840→          this.airState = 'REARM';
+   841→          this.rearmT = 38;
+   842→          this.hp = Math.max(this.hp, this.def.hp * 0.55);
+   843→          this.damageSmokeT = 0;
+   844→        }
+   845→        break;
+   846→      }
+   847→
+   848→      case 'RTB': {
+   849→        // exit toward SW
+   850→        const desired = angleOf(-600 - this.x, 3300 - this.y);
+   851→        const diff = angDiff(this.angle, desired);
+   852→        this.angle += clamp(diff, -this.def.turnRate * dt, this.def.turnRate * dt);
+   853→        this.x += Math.cos(this.angle) * speed * dt;
+   854→        this.y += Math.sin(this.angle) * speed * dt;
+   855→        this.bank = clamp(this.bank + (Math.sign(diff) - this.bank) * dt * 2, -1, 1);
+   856→        if (this.x < -260 || this.y > ctx.terrain.H + 260) {
+   857→          this.airState = 'REARM';
+   858→          this.rearmT = 34;
+   859→          this.hp = Math.max(this.hp, this.def.hp * 0.6);
+   860→        }
+   861→        break;
+   862→      }
+   863→
+   864→      case 'REARM': {
+   865→        this.rearmT -= dt;
+   866→        if (this.rearmT <= 0) {
+   867→          this.airState = 'INBOUND';
+   868→          this.ammo = this.def.ammo;
+   869→          this.hp = this.def.hp;
+   870→          this.x = 200;
+   871→          this.y = ctx.terrain.H - 60;
+   872→          this.angle = -Math.PI / 3;
+   873→          ctx.log(`${this.callsign} · ON STATION — INBOUND`, 'info');
+   874→        }
+   875→        break;
+   876→      }
+   877→
+   878→      case 'DOWN':
+   879→        break;
+   880→    }
+   881→
+   882→    // aircraft damaged smoke
+   883→    if (this.hp < this.def.hp * 0.55 && (this.airState === 'PATROL' || this.airState === 'RTB')) {
+   884→      this.damageSmokeT -= dt;
+   885→      if (this.damageSmokeT <= 0) {
+   886→        this.damageSmokeT = 0.22;
+   887→        ctx.effects.spawnSmoke(this.x, this.y, { r: 1.6, r1: 9, life: 2.4, alpha: 0.34 });
+   888→      }
+   889→    }
+   890→
+   891→    // separation from other aircraft is unnecessary (only 2, offset patrols)
+   892→    void this.turretAngle;
+   893→  }
+   894→
+   895→  damageSmokeT = 0;
+   896→
+   897→  onEvaded() {
+   898→    // flare pop — visual handled by projectile system
+   899→  }
+   900→
+   901→  /** launch aircraft from standby */
+   902→  launchAir(patrol: Vec2) {
+   903→    this.patrol = { ...patrol };
+   904→    this.airState = 'INBOUND';
+   905→    this.ammo = this.def.ammo;
+   906→    this.hp = this.def.hp;
+   907→    this.x = 200;
+   908→    this.y = 3200;
+   909→    this.angle = -Math.PI / 3;
+   910→  }
+   911→
+   912→  // ── damage ─────────────────────────────────────────────────
+   913→
+   914→  takeDamage(dmg: number, ctx: SimContext, projKind?: string, attacker?: Unit, aspect = 1) {
+   915→    if (this.dead) return;
+   916→    let d = dmg * aspect;
+   917→    if (projKind === 'AUTO') {
+   918→      if (this.def.kind === 'MBT') d *= 0.28;
+   919→      else if (this.def.kind === 'IFV') d *= 0.7;
+   920→      else if (this.def.kind === 'HQ') d *= 0.12;
+   921→      else if (this.def.kind === 'FACTORY') d *= 0.06;
+   922→    }
+   923→    if (projKind === 'SHELL' && this.def.kind === 'HQ') d *= 0.55;
+   924→    if (projKind === 'SHELL' && this.def.kind === 'FACTORY') d *= 0.8;
+   925→    if (projKind === 'MISSILE_AIR' && this.def.kind === 'HQ') d *= 0.8;
+   926→    if (projKind === 'MISSILE_AIR' && this.def.kind === 'FACTORY') d *= 1.25;
+   927→    if (projKind === 'ARTY' && this.def.kind === 'FACTORY') d *= 1.15;
+   928→    this.hp -= d;
+   929→    this.damageFlash = 1;
+   930→    // being hit is suppressing
+   931→    this.suppression = Math.min(1, this.suppression + 0.12 + Math.min(0.24, d / 140));
+   932→    if (attacker) {
+   933→      this.lastAttacker = attacker;
+   934→      this.lastAttackedT = ctx.time;
+   935→    }
+   936→    if (this.hp <= 0) {
+   937→      this.hp = 0;
+   938→      this.die(ctx);
+   939→    }
+   940→  }
+   941→
+   942→  die(ctx: SimContext) {
+   943→    this.dead = true;
+   944→    const fx = ctx.effects;
+   945→    if (this.def.kind === 'FACTORY') {
+   946→      // ── an ink works dies spectacularly ─────────────────────
+   947→      // initial eruption
+   948→      fx.spawnExplosion(this.x, this.y, {
+   949→        dir: this.rng.range(0, Math.PI * 2),
+   950→        dirStrength: 0.3,
+   951→        scale: 4.6,
+   952→        crater: 18,
+   953→        smoke: 18,
+   954→        debris: 26,
+   955→        stains: 90,
+   956→        ring: true,
+   957→        sound: 'kill',
+   958→        shake: 8,
+   959→      });
+   960→      // secondary structural collapses rolling through the plant
+   961→      fx.scheduleBlasts(this.x, this.y, {
+   962→        count: 8,
+   963→        duration: 5.5,
+   964→        spread: 60,
+   965→        scaleMin: 1.6,
+   966→        scaleMax: 3.1,
+   967→        delay: 0.7,
+   968→      });
+   969→      // a permanent scar and a smoking ruin
+   970→      fx.stampScorch(this.x, this.y, 130, 0.6);
+   971→      fx.stampScorch(this.x + 30, this.y - 20, 70, 0.5);
+   972→      fx.stampScorch(this.x - 34, this.y + 24, 60, 0.5);
+   973→      fx.addRubble({
+   974→        x: this.x,
+   975→        y: this.y,
+   976→        w: 56,
+   977→        h: 38,
+   978→        rot: 0.08,
+   979→        seed: this.rng.next(),
+   980→        born: ctx.time,
+   981→        smokeUntil: ctx.time + 720,
+   982→      });
+   983→      ctx.log(`${this.callsign} DESTROYED — THE WORKS BURN`, 'alert');
+   984→      ctx.economy?.onFactoryDestroyed(this);
+   985→      ctx.audio.explosion('kill', this.x, this.y, 4.4);
+   986→      return;
+   987→    }
+   988→    if (this.isAir) {
+   989→      // aircraft goes down in a streak of explosions
+   990→      const dir = this.angle;
+   991→      for (let i = 0; i < 3; i++) {
+   992→        const px = this.x + Math.cos(dir) * i * 22;
+   993→        const py = this.y + Math.sin(dir) * i * 22;
+   994→        fx.spawnExplosion(px, py, {
+   995→          dir,
+   996→          dirStrength: 1,
+   997→          scale: 1.0 + i * 0.3,
+   998→          crater: i === 2 ? 6 : 2,
+   999→          smoke: 4,
+  1000→          debris: 6,
+  1001→          stains: 22,
+  1002→          sound: 'kill',
+  1003→          shake: 2.6,
+  1004→        });
+  1005→      }
+  1006→      fx.addWreck({
+  1007→        x: this.x + Math.cos(dir) * 44,
+  1008→        y: this.y + Math.sin(dir) * 44,
+  1009→        angle: dir,
+  1010→        turretAngle: 0,
+  1011→        type: this.def.type,
+  1012→        faction: this.faction,
+  1013→        born: ctx.time,
+  1014→        smokeUntil: ctx.time + 240,
+  1015→        turretToss: null,
+  1016→      });
+  1017→      // a downed aircraft is terrain now
+  1018→      ctx.obstacles?.addWreck(this.x + Math.cos(dir) * 44, this.y + Math.sin(dir) * 44, 10);
+  1019→      ctx.log(`${this.callsign} · SHOT DOWN`, 'alert');
+  1020→    } else {
+  1021→      fx.spawnExplosion(this.x, this.y, {
+  1022→        dir: this.angle,
+  1023→        dirStrength: 0.55,
+  1024→        scale: this.def.kind === 'HQ' ? 3.2 : 2.1,
+  1025→        crater: this.def.kind === 'HQ' ? 12 : 6,
+  1026→        smoke: 9,
+  1027→        debris: this.def.kind === 'HQ' ? 16 : 11,
+  1028→        stains: 40,
+  1029→        ring: true,
+  1030→        sound: 'kill',
+  1031→        shake: 4.5,
+  1032→      });
+  1033→      // turret toss for tanks
+  1034→      let toss: { x: number; y: number; angle: number } | null = null;
+  1035→      if (this.def.kind === 'MBT' || this.def.kind === 'IFV') {
+  1036→        const a = this.rng.range(0, Math.PI * 2);
+  1037→        toss = { x: this.x + Math.cos(a) * this.rng.range(10, 20), y: this.y + Math.sin(a) * this.rng.range(10, 20), angle: this.rng.range(0, Math.PI * 2) };
+  1038→        fx.debris.push({
+  1039→          x: this.x,
+  1040→          y: this.y,
+  1041→          z: 3,
+  1042→          vx: Math.cos(a) * 26,
+  1043→          vy: Math.sin(a) * 26,
+  1044→          vz: 42,
+  1045→          spin: this.rng.range(-4, 4),
+  1046→          rot: this.turretAngle,
+  1047→          size: 3.2,
+  1048→          life: 0,
+  1049→          landed: false,
+  1050→          isTurret: true,
+  1051→          turretAngle: this.turretAngle,
+  1052→        });
+  1053→      }
+  1054→      fx.addWreck({
+  1055→        x: this.x,
+  1056→        y: this.y,
+  1057→        angle: this.angle + this.rng.range(-0.12, 0.12),
+  1058→        turretAngle: this.turretAngle,
+  1059→        type: this.def.type,
+  1060→        faction: this.faction,
+  1061→        born: ctx.time,
+  1062→        smokeUntil: ctx.time + (this.def.kind === 'HQ' ? 400 : 150),
+  1063→        turretToss: toss,
+  1064→      });
+  1065→      // dead steel remains part of the fight — cover, obstacle, memory
+  1066→      if (this.def.kind !== 'HQ') ctx.obstacles?.addWreck(this.x, this.y, this.def.length);
+  1067→      if (this.def.kind === 'HQ') {
+  1068→        fx.stampScorch(this.x, this.y, 42, 0.5);
+  1069→      }
+  1070→    }
+  1071→    ctx.audio.explosion('kill', this.x, this.y, 2.2);
+  1072→  }
+  1073→
+  1074→  // ── HUD helpers ────────────────────────────────────────────
+  1075→
+  1076→  getActivity(): UnitActivity {
+  1077→    if (this.dead) return 'DESTROYED';
+  1078→    if (this.isAir) {
+  1079→      switch (this.airState) {
+  1080→        case 'STANDBY':
+  1081→          return 'REARMING';
+  1082→        case 'INBOUND':
+  1083→          return 'PATROLLING';
+  1084→        case 'PATROL':
+  1085→          if (this.runPhase === 'INGRESS') return 'ATTACK RUN';
+  1086→          if (this.runPhase === 'EGRESS') return 'ATTACK RUN';
+  1087→          return this.target && !this.target.dead ? 'ATTACK RUN' : 'PATROLLING';
+  1088→        case 'RTB':
+  1089→          return 'RTB';
+  1090→        case 'REARM':
+  1091→          return 'REARMING';
+  1092→        case 'DOWN':
+  1093→          return 'DESTROYED';
+  1094→      }
+  1095→    }
+  1096→    if (this.def.kind === 'FACTORY') {
+  1097→      return 'HOLDING';
+  1098→    }
+  1099→    if (this.isReinforcement) return 'INBOUND';
+  1100→    if (this.pinned) return 'PINNED';
+  1101→    if (this.suppression > 0.5) return 'SUPPRESSED';
+  1102→    if (this.order.type === 'FIRE_MISSION') return 'FIRE MISSION';
+  1103→    if (this.target && !this.target.dead) return this.reloadT > 0 ? 'RELOADING' : 'ENGAGING';
+  1104→    if (this.path.length > 0) return 'MOVING';
+  1105→    return 'HOLDING';
+  1106→  }
+  1107→
+  1108→  positionGrid(): string {
+  1109→    return gridString(this.x, this.y);
+  1110→  }
+  1111→}
+  1112→

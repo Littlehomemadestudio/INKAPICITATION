@@ -210,7 +210,10 @@ export class InputSystem {
         }
         continue;
       }
-      const r = Math.max(6, 14 / this.game.camera.zoom) * (u.isAir ? 1.6 : 1);
+      const r =
+        Math.max(6, 14 / this.game.camera.zoom) *
+        (u.isAir ? 1.6 : 1) *
+        (u.isShip ? Math.max(2.2, u.def.length / 22) : 1);
       const d = dist(wx, wy, u.x, u.y);
       if (d < r && d < bd) {
         bd = d;
@@ -289,8 +292,8 @@ export class InputSystem {
     // enemy under cursor → attack / fire mission
     const enemy = this.unitAt(w.x, w.y, false);
     if (enemy && enemy.faction === 'ENEMY') {
-      const arty = sel.filter((u) => u.def.projectile === 'ARTY');
-      const direct = sel.filter((u) => u.def.projectile !== 'ARTY');
+      const arty = sel.filter((u) => u.def.projectile === 'ARTY' && !u.isShip);
+      const direct = sel.filter((u) => u.def.projectile !== 'ARTY' || u.isShip);
       for (const u of direct) u.orderAttack(enemy, this.game.simCtx());
       for (const u of arty) {
         u.orderFireMission({ x: enemy.x, y: enemy.y });
@@ -354,9 +357,18 @@ export class InputSystem {
         threat = { x: e.x, y: e.y };
       }
     }
-    // spacing by role: armour fights at arm's length
+    // spacing by role: armour fights at arm's length — a fleet
+    // manoeuvres in open order, hulls never crowding
     const spacingFor = (u: Unit) =>
-      u.def.kind === 'MBT' ? 78 : u.def.kind === 'IFV' ? 62 : u.def.kind === 'SPG' ? 84 : 54;
+      u.isShip
+        ? u.def.length * 2.4 + 60
+        : u.def.kind === 'MBT'
+          ? 78
+          : u.def.kind === 'IFV'
+            ? 62
+            : u.def.kind === 'SPG'
+              ? 84
+              : 54;
     const cols = Math.ceil(Math.sqrt(units.length));
     units.forEach((u, i) => {
       const col = i % cols;
@@ -366,7 +378,19 @@ export class InputSystem {
       const oy = (row - (Math.ceil(units.length / cols) - 1) / 2) * spacing * 1.3;
       let px = dest.x + Math.cos(perp) * ox - Math.cos(ang) * oy;
       let py = dest.y + Math.sin(perp) * ox - Math.sin(ang) * oy;
-      if (threat && u.def.kind !== 'SPG') {
+      if (u.isShip) {
+        // a hull's berth must be honest water for her draft — pull
+        // formation slots back toward the flagship until they float
+        const draft = u.draft;
+        let tries = 0;
+        while (
+          tries++ < 14 &&
+          this.game.terrain.sea.navShore[clamp((px / 64) | 0, 0, this.game.terrain.sea.nw - 1) + clamp((py / 64) | 0, 0, this.game.terrain.sea.nh - 1) * this.game.terrain.sea.nw] < draft
+        ) {
+          px = px + (dest.x - px) * 0.35;
+          py = py + (dest.y - py) * 0.35;
+        }
+      } else if (threat && u.def.kind !== 'SPG') {
         const refined = refineCover(this.game.simCtx(), { x: px, y: py }, threat, 36);
         px = refined.x;
         py = refined.y;

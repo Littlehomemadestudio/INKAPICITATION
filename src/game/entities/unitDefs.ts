@@ -18,6 +18,12 @@ export type UnitType =
   | '2S19'
   | 'TOR'
   | 'PANTSIR'
+  | 'SU25K'
+  | 'PATROL'
+  | 'FRIGATE'
+  | 'DESTROYER'
+  | 'CRUISER'
+  | 'BATTLESHIP'
   | 'HQ'
   | 'FACTORY';
 
@@ -50,6 +56,16 @@ export interface UnitDef {
   /** hull length in metres (draw anchor) */
   length: number;
   width: number;
+  /** SEA domain — naval movement, naval pathing, naval death */
+  domain?: 'LAND' | 'SEA';
+  /** minimum shore clearance for navigation (m) */
+  draft?: number;
+  /** acceleration (m/s²) — ships are heavy */
+  accel?: number;
+  /** preferred gunnery band (m): [stand-off, closest approach] */
+  standoff?: [number, number];
+  /** turret mounts — weapon layout, per class (see shipDraw.ts) */
+  mounts?: number;
 }
 
 function def(p: Partial<UnitDef> & { type: UnitType; kind: UnitKind; name: string; shortName: string; role: string; faction: Faction }): UnitDef {
@@ -175,6 +191,65 @@ export const UNIT_DEFS: Record<UnitType, UnitDef> = {
     range: 0, damage: 0, reload: 99, ammo: 0, projectile: 'SHELL', accuracy: 0,
     bounty: 0, length: 34, width: 26,
   }),
+
+  // ── enemy close air support — hunts the fleet, strafes the shore ──
+  SU25K: def({
+    type: 'SU25K', kind: 'AIR', name: 'SU-25K FROGFOOT', shortName: 'CAS',
+    role: 'ATTACK AIRCRAFT', faction: 'ENEMY',
+    hp: 80, speed: 54, turnRate: 0.95, turretRate: 6, vision: 1150,
+    range: 720, damage: 44, splash: 26, reload: 1.4,
+    ammo: 6, projectile: 'MISSILE_AIR', accuracy: 0.85, canHitAir: false, isAir: true,
+    bounty: 52, length: 15.3, width: 9.8,
+  }),
+
+  // ── naval forces — one fleet, five silhouettes ──
+  // Weapon batteries are per-mount (shipDraw.ts SHIP_CONFIGS); the
+  // aggregate below drives targeting + HUD.
+  PATROL: def({
+    type: 'PATROL', kind: 'NAVAL', name: 'MORAY FAST ATTACK CRAFT', shortName: 'PT',
+    role: 'TORPEDO / PATROL CRAFT', faction: 'FRIEND',
+    hp: 70, speed: 15, turnRate: 0.8, turretRate: 2.8, vision: 780,
+    range: 430, damage: 3.4, burst: 6, burstInterval: 0.14, reload: 2.6,
+    ammo: 520, projectile: 'AUTO', accuracy: 0.8, canHitAir: true,
+    bounty: 42, length: 27, width: 6.6, domain: 'SEA', draft: 34, accel: 3.4,
+    standoff: [330, 180], mounts: 3,
+  }),
+  FRIGATE: def({
+    type: 'FRIGATE', kind: 'NAVAL', name: 'VALKYRIE FRIGATE', shortName: 'FF',
+    role: 'ESCORT / GENERAL COMBAT', faction: 'FRIEND',
+    hp: 175, speed: 10.5, turnRate: 0.3, turretRate: 1.4, vision: 980,
+    range: 860, damage: 26, reload: 3.4,
+    ammo: 96, projectile: 'NAVAL_SHELL', accuracy: 0.78, canHitAir: true,
+    bounty: 88, length: 96, width: 13, domain: 'SEA', draft: 52, accel: 1.5,
+    standoff: [700, 420], mounts: 3,
+  }),
+  DESTROYER: def({
+    type: 'DESTROYER', kind: 'NAVAL', name: 'SLEIPNIR DESTROYER', shortName: 'DD',
+    role: 'GUIDED MISSILE DESTROYER', faction: 'FRIEND',
+    hp: 265, speed: 9.5, turnRate: 0.24, turretRate: 1.0, vision: 1120,
+    range: 1160, damage: 44, reload: 4.2,
+    ammo: 128, projectile: 'NAVAL_SHELL', accuracy: 0.78, canHitAir: true,
+    bounty: 145, length: 134, width: 16.4, domain: 'SEA', draft: 66, accel: 1.1,
+    standoff: [980, 620], mounts: 4,
+  }),
+  CRUISER: def({
+    type: 'CRUISER', kind: 'NAVAL', name: 'TRIREME CRUISER', shortName: 'CG',
+    role: 'LARGE SURFACE COMBATANT', faction: 'FRIEND',
+    hp: 430, speed: 8, turnRate: 0.18, turretRate: 0.8, vision: 1220,
+    range: 1460, damage: 54, reload: 5,
+    ammo: 180, projectile: 'NAVAL_SHELL', accuracy: 0.78, canHitAir: true,
+    bounty: 235, length: 172, width: 19, domain: 'SEA', draft: 80, accel: 0.8,
+    standoff: [1250, 820], mounts: 6,
+  }),
+  BATTLESHIP: def({
+    type: 'BATTLESHIP', kind: 'NAVAL', name: 'VELIKIY — CAPITAL SHIP', shortName: 'BB',
+    role: 'THE BIG BOI · BATTLESHIP', faction: 'FRIEND',
+    hp: 950, speed: 7, turnRate: 0.11, turretRate: 0.4, vision: 1380,
+    range: 1650, damage: 100, reload: 6.8,
+    ammo: 260, projectile: 'NAVAL_SHELL', accuracy: 0.76, canHitAir: true,
+    bounty: 520, length: 238, width: 33, domain: 'SEA', draft: 96, accel: 0.55,
+    standoff: [1500, 1050], mounts: 9,
+  }),
   FACTORY: def({
     type: 'FACTORY', kind: 'FACTORY', name: 'INK WORKS', shortName: 'IND',
     role: 'STRATEGIC INDUSTRIAL ASSET', faction: 'ENEMY',
@@ -194,5 +269,11 @@ export function kindLabel(kind: UnitKind): string {
     case 'SPAA': return 'AD';
     case 'HQ': return 'HQ';
     case 'FACTORY': return 'IND';
+    case 'NAVAL': return 'SEA';
   }
+}
+
+/** true if the type is a naval hull */
+export function isNavalType(t: string): boolean {
+  return t === 'PATROL' || t === 'FRIGATE' || t === 'DESTROYER' || t === 'CRUISER' || t === 'BATTLESHIP';
 }

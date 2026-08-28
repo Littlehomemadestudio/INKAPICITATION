@@ -53,7 +53,10 @@ export class EnemyCommander {
     ctx.economy?.aiThink(dt, ctx);
 
     // defend the ink works when they come under threat
-    this.factoryResponse(ctx);
+    this.factoryResponse(dt, ctx);
+
+    // the bay is a war too — screen the port, hunt the fleet
+    this.navalResponse(dt, ctx);
 
     if (this.timer > 0) return;
     this.timer = 1.4;
@@ -194,9 +197,9 @@ export class EnemyCommander {
   }
 
   /** if a works is threatened, nearby forces converge to hold it */
-  private factoryResponse(ctx: SimContext) {
+  private factoryResponse(dt: number, ctx: SimContext) {
     if (this.factoryAlarmT > 0) {
-      this.factoryAlarmT -= 1.4 * 0.7;
+      this.factoryAlarmT -= dt;
       return;
     }
     for (const f of ctx.units) {
@@ -234,6 +237,60 @@ export class EnemyCommander {
   }
 
   private factoryAlarmT = 0;
+
+  /** the naval war: patrol craft sortie against hulls in the bay,
+   *  and the shore batteries wake when the fleet closes the coast */
+  private navalResponse(dt: number, ctx: SimContext) {
+    if (this.navalAlarmT > 0) {
+      this.navalAlarmT -= dt;
+      return;
+    }
+    const friendlyHulls = ctx.units.filter((u) => u.faction === 'FRIEND' && u.isShip && !u.dead && !u.sinking);
+    if (!friendlyHulls.length) return;
+    // do the patrol boats even see them? the bay is wide
+    const enemyWatchers = ctx.units.filter((u) => u.faction === 'ENEMY' && !u.dead);
+    const spotted = friendlyHulls.filter((h) =>
+      enemyWatchers.some((w) => !w.dead && w.visibleTargets.includes(h))
+    );
+    if (!spotted.length) return;
+
+    this.navalAlarmT = 30;
+    ctx.log(`ENEMY PATROL CRAFT SORTIEING — THE BAY IS CONTESTED`, 'alert');
+    const boats = ctx.units.filter((u) => u.faction === 'ENEMY' && u.isShip && !u.dead && !u.sinking);
+    for (const b of boats) {
+      if (b.path.length > 0) continue;
+      // torpedo doctrine: drive at the nearest spotted hull
+      let best: Unit | null = null;
+      let bd = Infinity;
+      for (const h of spotted) {
+        const d = dist(b.x, b.y, h.x, h.y);
+        if (d < bd) {
+          bd = d;
+          best = h;
+        }
+      }
+      if (best) {
+        b.orderAttack(best, ctx);
+        b.stance = 'AGGRESSIVE';
+      }
+    }
+    // coastal guns shift fire toward the fleet if it threatens the shore
+    const shoreThreat = spotted.find((h) => dist(h.x, h.y, 3350, 1900) < 1500);
+    if (shoreThreat) {
+      for (const g of this.guns) {
+        if (g.unit.dead || g.unit.ammo <= 0 || g.displaceT > 0) continue;
+        if (dist(g.unit.x, g.unit.y, shoreThreat.x, shoreThreat.y) > g.unit.def.range * 0.95) continue;
+        g.unit.orderFireMission({ x: shoreThreat.x + (Math.random() - 0.5) * 80, y: shoreThreat.y + (Math.random() - 0.5) * 80 });
+        g.unit.fireMissionLeft = 4;
+        g.missionCooldown = 24 + Math.random() * 12;
+        g.displaceT = 40;
+        ctx.log(`SHORE BATTERIES FIRING ON THE FLEET`, 'alert');
+        break;
+      }
+    }
+  }
+
+  private navalAlarmT = 0;
 
   private findCluster(gun: Unit, targets: Unit[]): Vec2 | null {
     let best: Vec2 | null = null;

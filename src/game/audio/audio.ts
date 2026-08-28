@@ -18,6 +18,12 @@ export class AudioEngine {
   private active = 0;
   private lastByKind: Record<string, number> = {};
 
+  // ── the dynamic score: drama through contrast ──
+  music: MusicEngine | null = null;
+  /** 0..1 — how close the listener stands to open water */
+  oceanProximity = 0;
+  private oceanGain: GainNode | null = null;
+
   ensureStarted() {
     if (this.ctx) {
       if (this.ctx.state === 'suspended') void this.ctx.resume();
@@ -49,9 +55,18 @@ export class AudioEngine {
       }
       this.noiseBuf = buf;
 
+      this.music = new MusicEngine(this.ctx, this.master);
       this.startAmbience();
     } catch {
       this.ctx = null;
+    }
+  }
+
+  /** how near the listener is to the sea — swells the ocean bed */
+  setOceanProximity(p: number) {
+    this.oceanProximity = p;
+    if (this.oceanGain && this.ctx) {
+      this.oceanGain.gain.setTargetAtTime(0.012 + p * 0.05, this.ctx.currentTime, 0.8);
     }
   }
 
@@ -96,7 +111,178 @@ export class AudioEngine {
     return { node: gain, vol };
   }
 
-  // ── one-shots ──────────────────────────────────────────────
+  // ── one-shots ───────────────────────────────────────────
+
+  /** naval gunfire — the heaviest voice on the sheet. Distance
+   *  lowpasses the report: far guns are weather, near guns are
+   *  violence. Calibre in mm. */
+  navalGun(x: number, y: number, calibre: number) {
+    if (!this.ctx) return;
+    const key = calibre >= 200 ? 'ng-big' : calibre >= 100 ? 'ng-med' : 'ng-small';
+    const gap = calibre >= 200 ? 0.5 : calibre >= 100 ? 0.24 : 0.12;
+    if (!this.throttle(key, gap)) return;
+    const maxDist = calibre >= 200 ? 6400 : 4200;
+    const d = Math.hypot(x - this.listenerX, y - this.listenerY);
+    const att = clamp(1 - d / maxDist, 0, 1) ** 1.25;
+    if (att <= 0.01) return;
+    const vol = (0.34 + calibre / 900) * att;
+    if (this.active > 26 && vol < 0.12) return;
+    if (!this.ctx || !this.master || !this.noiseBuf || !this.enabled) return;
+    const g = this.ctx.createGain();
+    const pan = this.ctx.createStereoPanner();
+    pan.pan.value = this.panFor(x);
+    g.connect(pan);
+    pan.connect(this.master);
+    this.active++;
+    const t = this.ctx.currentTime;
+
+    // the crack — band-limited noise, darker with distance
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.5 + Math.random() * 0.1;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    const bright = clamp(1 - d / maxDist, 0, 1);
+    const f0 = 420 + calibre * 1.2 + bright * 700;
+    filter.frequency.setValueAtTime(f0, t);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(70, f0 * 0.1), t + 0.9 + calibre / 500);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.8 + calibre / 400);
+    src.connect(filter);
+    filter.connect(g);
+    src.start(t);
+    src.stop(t + 0.9 + calibre / 350);
+    src.onended = () => this.active--;
+
+    // the thud you feel in the deck plates
+    const sub = this.ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(38 + calibre / 12, t);
+    sub.frequency.exponentialRampToValueAtTime(24, t + 0.7 + calibre / 600);
+    const sg = this.ctx.createGain();
+    sg.gain.setValueAtTime(0.0001, t);
+    sg.gain.exponentialRampToValueAtTime(vol * 0.9, t + 0.02);
+    sg.gain.exponentialRampToValueAtTime(0.0001, t + 0.7 + calibre / 550);
+    sub.connect(sg);
+    sg.connect(g);
+    sub.start(t);
+    sub.stop(t + 0.8 + calibre / 500);
+  }
+
+  /** a shell finds the sea — the plunge, the white crash, the wash */
+  bigSplash(x: number, y: number, calibre: number) {
+    if (!this.ctx || !this.master || !this.noiseBuf || !this.enabled) return;
+    if (!this.throttle('splash', 0.08)) return;
+    const maxDist = 2600 + calibre * 2.5;
+    const att = this.attenFor(x, y, maxDist);
+    if (att <= 0.01) return;
+    const vol = (0.3 + calibre / 700) * att;
+    const g = this.ctx.createGain();
+    const pan = this.ctx.createStereoPanner();
+    pan.pan.value = this.panFor(x);
+    g.connect(pan);
+    pan.connect(this.master);
+    this.active++;
+    const t = this.ctx.currentTime;
+
+    // the hollow plunge
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.9;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(700, t);
+    filter.frequency.exponentialRampToValueAtTime(240, t + 0.4);
+    filter.Q.value = 0.8;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55 + calibre / 600);
+    src.connect(filter);
+    filter.connect(g);
+    src.start(t);
+    src.stop(t + 0.7 + calibre / 500);
+    src.onended = () => this.active--;
+
+    // the spray washing outward
+    const wash = this.ctx.createBufferSource();
+    wash.buffer = this.noiseBuf;
+    wash.playbackRate.value = 1.6;
+    const wf = this.ctx.createBiquadFilter();
+    wf.type = 'highpass';
+    wf.frequency.value = 900;
+    const wg = this.ctx.createGain();
+    wg.gain.setValueAtTime(0.0001, t + 0.06);
+    wg.gain.exponentialRampToValueAtTime(vol * 0.4, t + 0.16);
+    wg.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+    wash.connect(wf);
+    wf.connect(wg);
+    wg.connect(pan);
+    wash.start(t + 0.05);
+    wash.stop(t + 1.0);
+
+    // a deep one moves the whole bay
+    if (calibre >= 150) {
+      const sub = this.ctx.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(44, t);
+      sub.frequency.exponentialRampToValueAtTime(26, t + 0.6);
+      const sg = this.ctx.createGain();
+      sg.gain.setValueAtTime(0.0001, t);
+      sg.gain.exponentialRampToValueAtTime(vol * 0.7, t + 0.02);
+      sg.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
+      sub.connect(sg);
+      sg.connect(g);
+      sub.start(t);
+      sub.stop(t + 0.7);
+    }
+  }
+
+  /** a hull breaks and goes down — groaning steel, then the sea closes */
+  shipBreaking(x: number, y: number, length: number) {
+    if (!this.ctx || !this.master || !this.noiseBuf || !this.enabled) return;
+    const big = length > 150;
+    const dest = this.makeDest(x, y, big ? 5600 : 3600, big ? 0.9 : 0.7);
+    if (!dest) return;
+    this.active++;
+    const t = this.ctx.currentTime;
+
+    // the groan — tortured steel bending
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(big ? 42 : 70, t);
+    osc.frequency.linearRampToValueAtTime(big ? 22 : 40, t + 2.4);
+    const of = this.ctx.createBiquadFilter();
+    of.type = 'lowpass';
+    of.frequency.value = 180;
+    const og = this.ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t);
+    og.gain.exponentialRampToValueAtTime(dest.vol * 0.5, t + 0.3);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 2.6);
+    osc.connect(of);
+    of.connect(og);
+    og.connect(dest.node);
+    osc.start(t);
+    osc.stop(t + 2.7);
+
+    // the rumble of a dying hull
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.4;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 130;
+    const g2 = this.ctx.createGain();
+    g2.gain.setValueAtTime(0.0001, t);
+    g2.gain.exponentialRampToValueAtTime(dest.vol * 0.8, t + 0.15);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t + 3.2);
+    src.connect(filter);
+    filter.connect(g2);
+    g2.connect(dest.node);
+    src.start(t);
+    src.stop(t + 3.4);
+    src.onended = () => this.active--;
+  }
 
   explosion(kind: 'shell' | 'arty' | 'missile' | 'kill' | 'small', x: number, y: number, scale: number) {
     if (!this.ctx) return;
@@ -421,6 +607,36 @@ export class AudioEngine {
     for (const id of Array.from(this.engineNodes.keys())) this.stopEngine(id);
   }
 
+  /** ship engine — the deep diesel heartbeat of a big hull */
+  startShipEngine(id: number, x: number, y: number, length: number) {
+    if (!this.ctx || !this.master || this.engineNodes.has(id) || !this.noiseBuf) return;
+    const t = this.ctx.currentTime;
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = this.noiseBuf;
+    noise.loop = true;
+    noise.playbackRate.value = 0.35;
+    const tone = this.ctx.createOscillator();
+    tone.type = 'triangle';
+    tone.frequency.value = 22 + 26 / Math.max(1, length / 60); // big hull = slow thump
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 130;
+    const toneGain = this.ctx.createGain();
+    toneGain.gain.value = 0.5;
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0;
+    const pan = this.ctx.createStereoPanner();
+    noise.connect(lp);
+    tone.connect(toneGain);
+    toneGain.connect(lp);
+    lp.connect(gain);
+    gain.connect(pan);
+    pan.connect(this.master);
+    noise.start(t);
+    tone.start(t);
+    this.engineNodes.set(id, { noise, tone, gain, pan, lp, hp: lp, vol: 0, lastX: x, lastY: y, rate: 1 });
+  }
+
   // ── ambience ───────────────────────────────────────────────
 
   private startAmbience() {
@@ -445,6 +661,28 @@ export class AudioEngine {
     filter.connect(g);
     g.connect(this.master);
     src.start();
+
+    // ── the ocean: a long slow swell that grows near the coast ──
+    const oSrc = this.ctx.createBufferSource();
+    oSrc.buffer = this.noiseBuf;
+    oSrc.loop = true;
+    oSrc.playbackRate.value = 0.5;
+    const oFilter = this.ctx.createBiquadFilter();
+    oFilter.type = 'lowpass';
+    oFilter.frequency.value = 240;
+    this.oceanGain = this.ctx.createGain();
+    this.oceanGain.gain.value = 0.012;
+    const swell = this.ctx.createOscillator();
+    swell.frequency.value = 0.12; // ~8 s wave period
+    const swellGain = this.ctx.createGain();
+    swellGain.gain.value = 0.008;
+    swell.connect(swellGain);
+    swellGain.connect(this.oceanGain.gain);
+    swell.start();
+    oSrc.connect(oFilter);
+    oFilter.connect(this.oceanGain);
+    this.oceanGain.connect(this.master);
+    oSrc.start();
 
     // occasional far-off thunder to keep the sheet alive
     const rumble = () => {
@@ -471,5 +709,240 @@ export class AudioEngine {
       window.setTimeout(rumble, 24000 + Math.random() * 50000);
     };
     window.setTimeout(rumble, 30000);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PAPER STORM · the score
+// Drama through contrast: a restrained low bed that breathes
+// with the battle, swells when the fleet is found, and goes
+// quiet when something enormous dies. Nothing plays loudly
+// for long — silence is an instrument here.
+// ─────────────────────────────────────────────────────────────
+
+export class MusicEngine {
+  private ctx: AudioContext;
+  private out: GainNode;
+
+  // beds
+  private padGain: GainNode;
+  private tenseGain: GainNode;
+  private pulseGain: GainNode;
+  private drumGain: GainNode;
+  private pulseTimer = 0;
+  private drumTimer = 0;
+  private beat = 0;
+
+  /** current target intensity 0..4 */
+  intensity = 0;
+  private display = 0;
+  private duckUntil = 0;
+
+  constructor(ctx: AudioContext, master: GainNode) {
+    this.ctx = ctx;
+    this.out = ctx.createGain();
+    this.out.gain.value = 0.9;
+    this.out.connect(master);
+
+    // ── the pad: low detuned strings, minor, always breathing ──
+    this.padGain = ctx.createGain();
+    this.padGain.gain.value = 0;
+    const padFilter = ctx.createBiquadFilter();
+    padFilter.type = 'lowpass';
+    padFilter.frequency.value = 260;
+    padFilter.Q.value = 0.4;
+    this.padGain.connect(padFilter);
+    padFilter.connect(this.out);
+    // A minor open fifth cluster: A2, E3, C4 — solemn, not sad
+    for (const [freq, det] of [
+      [110, -4],
+      [110, 5],
+      [164.8, 3],
+      [261.6, -3],
+    ] as const) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = freq;
+      osc.detune.value = det;
+      const g = ctx.createGain();
+      g.gain.value = 0.25;
+      osc.connect(g);
+      g.connect(this.padGain);
+      osc.start();
+    }
+    // slow vibrato on the cluster — strings under a bow
+    const vib = ctx.createOscillator();
+    vib.frequency.value = 0.16;
+    const vibGain = ctx.createGain();
+    vibGain.gain.value = 3;
+    vib.connect(vibGain);
+    vib.start();
+
+    // ── the tension layer: a high held note that only the fight brings ──
+    this.tenseGain = ctx.createGain();
+    this.tenseGain.gain.value = 0;
+    const tFilter = ctx.createBiquadFilter();
+    tFilter.type = 'lowpass';
+    tFilter.frequency.value = 1200;
+    this.tenseGain.connect(tFilter);
+    tFilter.connect(this.out);
+    for (const [freq, det] of [
+      [440, -5],
+      [440, 6],
+      [523.25, 2],
+    ] as const) {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      osc.detune.value = det;
+      const g = ctx.createGain();
+      g.gain.value = 0.3;
+      osc.connect(g);
+      g.connect(this.tenseGain);
+      osc.start();
+    }
+
+    // ── pulse + drums are event-driven (no permanent nodes) ──
+    this.pulseGain = ctx.createGain();
+    this.pulseGain.gain.value = 1;
+    this.pulseGain.connect(this.out);
+    this.drumGain = ctx.createGain();
+    this.drumGain.gain.value = 1;
+    this.drumGain.connect(this.out);
+  }
+
+  /** the theatre's pulse — call every frame */
+  update(dt: number) {
+    // slew toward the target; a dip after a capital ship dies
+    const target = this.ctx.currentTime < this.duckUntil ? 0 : this.intensity;
+    this.display += (target - this.display) * Math.min(1, dt * 0.22);
+    const i = this.display;
+    const t = this.ctx.currentTime;
+
+    this.padGain.gain.setTargetAtTime(i >= 0.8 ? 0.028 + i * 0.006 : 0, t, 1.6);
+    this.tenseGain.gain.setTargetAtTime(i >= 2.2 ? 0.012 + (i - 2) * 0.008 : 0, t, 1.2);
+
+    // the heartbeat pulse — comes with real engagements
+    if (i >= 1.6) {
+      this.pulseTimer -= dt;
+      const period = i >= 3 ? 0.62 : 0.9;
+      if (this.pulseTimer <= 0) {
+        this.pulseTimer = period;
+        this.thump(58 - (this.beat % 4) * 2, 0.16 + i * 0.014, 0.34);
+        this.beat++;
+      }
+    }
+    // timpani at full war
+    if (i >= 3.1) {
+      this.drumTimer -= dt;
+      if (this.drumTimer <= 0) {
+        this.drumTimer = 1.85;
+        this.thump(46, 0.2, 0.6);
+        if (this.beat % 4 === 0) this.thump(69, 0.12, 0.5);
+      }
+    }
+  }
+
+  /** set the theatre's target intensity 0..4 */
+  setIntensity(v: number) {
+    this.intensity = Math.max(0, Math.min(4, v));
+  }
+
+  /** event stingers — the score notices what matters */
+  stinger(kind: 'contact' | 'capital' | 'capitalDown' | 'victory' | 'defeat') {
+    const t = this.ctx.currentTime;
+    switch (kind) {
+      case 'contact': {
+        // fleet sighted — a low brass warning
+        this.swell(98, 0.22, 2.2, 0.9);
+        this.swell(146.8, 0.12, 2.6, 1.4);
+        this.intensity = Math.max(this.intensity, 2);
+        break;
+      }
+      case 'capital': {
+        // the BIG BOI arrives — the key change of the war
+        this.swell(65.4, 0.3, 3.4, 0.8);
+        this.swell(98, 0.2, 3.8, 1.6);
+        this.swell(130.8, 0.12, 4.2, 2.2);
+        this.thump(44, 0.3, 1.2);
+        window.setTimeout(() => this.thump(44, 0.3, 1.2), 700);
+        this.intensity = 4;
+        break;
+      }
+      case 'capitalDown': {
+        // she is gone — the score steps back and lets the sea speak
+        this.swell(220, 0.16, 1.4, 0.3);
+        this.swell(110, 0.2, 3.0, 1.1);
+        this.thump(36, 0.34, 1.6);
+        this.duckUntil = t + 9;
+        this.intensity = 0.8;
+        break;
+      }
+      case 'victory': {
+        // A major — the resolution
+        for (const [f, d, at] of [
+          [220, 0.2, 0],
+          [277.2, 0.14, 0.25],
+          [329.6, 0.16, 0.5],
+          [440, 0.12, 0.8],
+        ] as const) {
+          window.setTimeout(() => this.swell(f, d, 3.6, at), at * 1000);
+        }
+        this.intensity = 2.4;
+        break;
+      }
+      case 'defeat': {
+        this.swell(110, 0.22, 4.5, 0.2);
+        this.swell(116.5, 0.16, 5.0, 2.4); // the semitone fall
+        this.duckUntil = t + 12;
+        this.intensity = 0;
+        break;
+      }
+    }
+  }
+
+  /** a bowed swell — strings rising into the frame */
+  private swell(freq: number, vol: number, dur: number, delay: number) {
+    const t = this.ctx.currentTime + delay;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = freq;
+    const osc2 = this.ctx.createOscillator();
+    osc2.type = 'sawtooth';
+    osc2.frequency.value = freq * 1.004;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(180, t);
+    filter.frequency.linearRampToValueAtTime(700, t + dur * 0.55);
+    filter.frequency.linearRampToValueAtTime(220, t + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + dur * 0.4);
+    g.gain.linearRampToValueAtTime(0.0001, t + dur);
+    osc.connect(filter);
+    osc2.connect(filter);
+    filter.connect(g);
+    g.connect(this.out);
+    osc.start(t);
+    osc2.start(t);
+    osc.stop(t + dur + 0.1);
+    osc2.stop(t + dur + 0.1);
+  }
+
+  /** a felt drum hit */
+  private thump(freq: number, vol: number, dur: number) {
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, t);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(24, freq * 0.5), t + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g);
+    g.connect(this.drumGain);
+    osc.start(t);
+    osc.stop(t + dur + 0.05);
   }
 }

@@ -57,6 +57,12 @@ export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
   add('BMP3', 'ENEMY', 3050, 1242, 'FOXTROT 3', Math.PI * 0.7, { x: 3050, y: 1242 });
   add('TOR', 'ENEMY', 3090, 1085, 'AD 1', Math.PI * 0.8, { x: 3090, y: 1085 });
 
+  // ── the harbour flotilla — KRAKEN GROUP holds PORT VELIKY ──
+  // Two patrol craft nest at the piers; they sortied when the
+  // fleet shows itself. The bay is their water until you take it.
+  add('PATROL', 'ENEMY', 3340, 2380, 'KPT 1', Math.PI * 0.9, { x: 3340, y: 2380 });
+  add('PATROL', 'ENEMY', 3262, 2440, 'KPT 2', Math.PI * 1.05, { x: 3262, y: 2440 });
+
   // ── HQ KRAKEN — NE compound ────────────────────────────────
   const HQA: Vec2 = { x: 3440, y: 640 };
   add('HQ', 'ENEMY', HQA.x, HQA.y, 'KRAKEN HQ', 0.18);
@@ -68,6 +74,9 @@ export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
   add('T90M', 'ENEMY', 3530, 715, 'RES 1', Math.PI * 0.9, { x: 3530, y: 715 });
   add('T90M', 'ENEMY', 3610, 770, 'RES 2', Math.PI * 0.9, { x: 3610, y: 770 });
   add('BMP3', 'ENEMY', 3425, 806, 'RES 3', Math.PI * 0.9, { x: 3425, y: 806 });
+
+  // the enemy's close air — held ready at the plateau
+  add('SU25K', 'ENEMY', 3480, 120, 'CLAW 1', Math.PI * 0.62);
 
   // ── ink works — the economic objectives ────────────────────
   for (const site of terrain.factories) {
@@ -98,6 +107,8 @@ export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
     { id: 'EBRIDGE', name: 'EAST BRIDGE', pos: { x: 2352, y: 1812 }, radius: 280, income: 1.6, control: 'ENEMY', captureTime: 8, captureT: 0, capturing: null },
     { id: 'FARMS', name: 'SOUTH FARMS', pos: { x: 1900, y: 2650 }, radius: 420, income: 1.8, control: 'FRIEND', captureTime: 9, captureT: 0, capturing: null },
     { id: 'PLATEAU', name: 'KRAKEN PLATEAU', pos: { x: 3440, y: 640 }, radius: 420, income: 2.2, control: 'ENEMY', captureTime: 10, captureT: 0, capturing: null },
+    // the sea pays too — the bay is ground you cannot dig
+    { id: 'BAY', name: 'VELIKIY BAY', pos: { x: 3550, y: 2620 }, radius: 520, income: 2.4, control: 'ENEMY', captureTime: 12, captureT: 0, capturing: null },
   ];
 
   const objectives: ObjectiveState[] = [
@@ -131,7 +142,7 @@ export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
     units,
     objectives,
     sectors,
-    anchors: { ECHO, FOXTROT, HQ: HQA },
+    anchors: { ECHO, FOXTROT, HQ: HQA, BAY: { x: 3550, y: 2620 }, PORT: { x: 3330, y: 2260 } },
     playerStaging: { x: 620, y: 2520 },
     startInk: { FRIEND: 260, ENEMY: 340 },
   };
@@ -143,15 +154,17 @@ export const BRIEFING = {
   situation: [
     'KRAKEN GROUP holds prepared defences across the river line. Their forward platoon (PL ECHO) holds the crossroads at NOVY MOST; a reinforced platoon (PL FOXTROT) occupies HILL 214 with short-range air defence. Their command post is dug in on the north-eastern plateau, screened by air defence systems and self-propelled guns.',
     'Three ink works feed their operation: MOLot 9 on the northern rail line, ZAVOD 3 in the southern farm belt (abandoned — unclaimed), and the ZAVOD 7 combine on the eastern highway. The works are hardened but not invulnerable. They can be captured — or destroyed.',
-    'Your authority to sustain this fight is INK. It flows in a thin trickle from corps, faster from every sector you clear, and heavily from any works you hold. Destroyed enemy formations also yield ink. Spend it to raise battalions at the staging area.',
+    'South-east, the river opens into VELIKIY BAY. KRAKEN GROUP holds PORT VELIKY with its piers and fuel stores, and two patrol craft nest there. Their Frogfoots will hunt any fleet you float. The bay itself pays ink — hulls in the water can take it. One war, one economy: every drop of ink buys tanks, aircraft, or ships.',
+    'Your authority to sustain this fight is INK. It flows in a thin trickle from corps, faster from every sector you clear, and heavily from any works you hold. Destroyed enemy formations also yield ink. Spend it to raise battalions at the staging area — or hulls from open water.',
   ],
   mission:
-    'TASK FORCE SABRE will cross the river, take the ground that pays, and neutralise the KRAKEN command post. Every bridge, hill and works you hold widens your margin of superiority.',
+    'TASK FORCE SABRE will cross the river, take the ground that pays, and neutralise the KRAKEN command post. Every bridge, hill, works and sea lane you hold widens your margin of superiority.',
   execution: [
     'PHASE 1 — Reconnoitre. Push SCOUT sections across the northern bridge or along the MSR. High ground sees further; ridgelines and buildings mask what lies behind them. The enemy is dug in — trench lines read as broken dark scars with a berm behind.',
     'PHASE 2 — Soften. Artillery fire scatters: observed targets are hit hard, blind area fire wastes shells. Keep eyes on a target and your guns will walk onto it — order artillery onto an enemy unit directly for corrected fire. Stone walls, buildings, ruins and wrecks shelter whoever holds them; suppress defenders with fire before you cross. The battlefield is matter, not a picture: shells fell timber, breach walls, and bring buildings down — a destroyed wall stops sheltering, a collapsed building opens new sightlines and rubble that still hides a hull.',
-    'PHASE 3 — Break. Fix the defenders, flank their cover, strike their flanks and rear — hits from bad angles hurt far more. Attack aircraft strike in committed passes and egress. TALON is available on call — watch for enemy air defence. Tanks push through tree lines and stone walls by force — light vehicles must steer; crews under fire will dive for the nearest solid cover and resume their mission when it slackens. Trust them to stay alive; order them forward when you must.',
-    'END STATE — KRAKEN HQ destroyed. The works you hold decide how expensive the victory was.',
+    'PHASE 3 — The sea. Hulls arrive from the APPROACHES in the south-east and make for the fleet anchorage. Patrol craft close to torpedo range; frigates and destroyers hold off and shoot; the capital ship VELIKIY reaches further than anything on this sheet. Mind the islands — they hide hulls from each other — and mind his Frogfoots: frigates and destroyers carry the answer in their cells.',
+    'PHASE 4 — Break. Fix the defenders, flank their cover, strike their flanks and rear — hits from bad angles hurt far more. Attack aircraft strike in committed passes and egress. Naval gunfire walks the shore: order a hull against a coastal target and watch the water columns rise. Tanks push through tree lines and stone walls by force — light vehicles must steer; crews under fire will dive for the nearest solid cover and resume their mission when it slackens. Trust them to stay alive; order them forward when you must.',
+    'END STATE — KRAKEN HQ destroyed. The works and sea lanes you hold decide how expensive the victory was.',
   ],
   forces: [
     ['SABRE 1-1 … 1-3', 'M1A2 SEPv3 — main battle tank'],
@@ -159,14 +172,14 @@ export const BRIEFING = {
     ['HAMMER 1 … 2', 'M109A7 Paladin — self-propelled 155 mm'],
     ['SCOUT 1 … 2', 'M1127 Stryker — reconnaissance'],
     ['TALON 1', 'A-10C Thunderbolt II — attack aircraft'],
-    ['DEPLOY PANEL', 'raise further battalions with INK'],
+    ['DEPLOY PANEL', 'raise battalions — or a fleet — with INK'],
   ],
   economy: [
     ['BASE INCOME', '+2.2 ink/s — always, even at your lowest'],
-    ['SECTORS', 'held ground pays +1.4 to +2.6 ink/s each'],
+    ['SECTORS', 'held ground pays +1.4 to +2.6 ink/s each — the bay included'],
     ['INK WORKS', 'captured works pay +5 ink/s — or burn'],
     ['KILL BOUNTIES', 'destroyed enemy units pay their worth in ink'],
-    ['DEPLOYMENT', 'battalions arrive at ASSEMBLY ALPHA, SW corner'],
+    ['DEPLOYMENT', 'battalions arrive at ASSEMBLY ALPHA · hulls at the FLEET ANCHORAGE'],
   ],
   controls: [
     ['LMB / DRAG', 'select unit · box-select units'],
@@ -183,5 +196,6 @@ export const BRIEFING = {
     'COMMS — traffic feeds onto the map, top-left; the bottom deck is instruments only',
     'RINGS — selecting a unit draws its sight (faint) and gun range (hard) on the ground',
     'COVER — a bracketed arc marks the sheltered side of a covered vehicle',
+    'THE SEA — hulls berth at the FLEET ANCHORAGE; unit lists scroll inside their own panels, never the map',
   ],
 };
