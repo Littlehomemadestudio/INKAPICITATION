@@ -127,6 +127,8 @@ export class VisionSystem {
       const adv = clamp((obH - tgH) * 0.011, -0.3, 0.32);
       r *= 1 + adv;
     }
+    // a suppressed observer keeps its head down
+    r *= 1 - 0.3 * observer.suppression;
     const forest = ctx.terrain.forestDensity(target.x, target.y);
     if (forest > 0.42) {
       const stationary = target.speedNow < 1.2;

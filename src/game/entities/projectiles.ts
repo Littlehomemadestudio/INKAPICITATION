@@ -90,7 +90,7 @@ export class ProjectileSystem {
     let ay = ty;
     if (this.rng.next() > accuracy) {
       const ma = this.rng.range(0, Math.PI * 2);
-      const md = this.rng.range(9, 30);
+      const md = this.rng.range(9, 34);
       ax += Math.cos(ma) * md;
       ay += Math.sin(ma) * md;
     }
@@ -115,10 +115,10 @@ export class ProjectileSystem {
     ctx.effects.muzzleFlash(owner.x + Math.cos(a) * muzzle, owner.y + Math.sin(a) * muzzle, a, 1.15);
   }
 
-  /** autocannon tracer burst round */
-  fireAuto(ctx: ProjectileContext, owner: Unit, tx: number, ty: number, damage: number) {
+  /** autocannon tracer burst round — misses scatter wider when aim is poor */
+  fireAuto(ctx: ProjectileContext, owner: Unit, tx: number, ty: number, damage: number, aim = 1) {
     const ma = this.rng.range(0, Math.PI * 2);
-    const md = this.rng.range(0, 7);
+    const md = this.rng.range(0, 7) / Math.max(0.25, aim);
     const ax = tx + Math.cos(ma) * md;
     const ay = ty + Math.sin(ma) * md;
     const a = angleOf(ax - owner.x, ay - owner.y);
@@ -141,12 +141,22 @@ export class ProjectileSystem {
     ctx.audio.autocannon(owner.x, owner.y);
   }
 
-  /** howitzer: ballistic arc onto an area */
-  fireArtillery(ctx: ProjectileContext, owner: Unit, tx: number, ty: number, damage: number, splash: number, dispersion: number) {
-    const ma = this.rng.range(0, Math.PI * 2);
-    const md = this.rng.range(0, dispersion);
-    const ax = tx + Math.cos(ma) * md;
-    const ay = ty + Math.sin(ma) * md;
+  /** howitzer: ballistic arc onto an area.
+   *  `quality` multiplies the dispersion ellipse — it is the price
+   *  of ignorance: unobserved fire scatters, corrected fire kills. */
+  fireArtillery(ctx: ProjectileContext, owner: Unit, tx: number, ty: number, damage: number, splash: number, quality = 1) {
+    // elliptical dispersion, stretched along the line of fire —
+    // range error beats deflection error, as it does in life
+    const baseSigma = 26;
+    const sigAlong = baseSigma * quality;
+    const sigAcross = baseSigma * 0.62 * quality;
+    const fireAng = angleOf(tx - owner.x, ty - owner.y);
+    // gaussian-ish: sum of two uniforms
+    const g = () => (this.rng.next() + this.rng.next() + this.rng.next() - 1.5) * 0.8;
+    const along = g() * sigAlong;
+    const across = g() * sigAcross;
+    const ax = tx + Math.cos(fireAng) * along - Math.sin(fireAng) * across;
+    const ay = ty + Math.sin(fireAng) * along + Math.cos(fireAng) * across;
     const d = dist(owner.x, owner.y, ax, ay);
     const flight = 2.4 + d / 150;
     const a = angleOf(ax - owner.x, ay - owner.y);
@@ -402,16 +412,38 @@ export class ProjectileSystem {
   }
 
   private applyDamage(p: Projectile, ctx: SimContext, x: number, y: number) {
+    const owner = ctx.units.find((u) => u.id === p.ownerId) ?? null;
     for (const u of ctx.units) {
       if (u.dead || u.faction === (p.friend ? 'FRIEND' : 'ENEMY')) continue;
       const d = dist(u.x, u.y, x, y);
       if (p.splash > 0) {
         if (d < p.splash) {
           const falloff = 1 - (d / p.splash) * 0.65;
-          u.takeDamage(p.damage * falloff, ctx);
+          u.takeDamage(p.damage * falloff, ctx, p.kind, owner ?? undefined);
+        } else if (d < p.splash * 1.8) {
+          // a near miss is still a near miss — dust, blast, fear
+          const near = 1 - (d - p.splash) / (p.splash * 0.8);
+          u.suppression = Math.min(1, u.suppression + near * 0.32);
+          if (owner) {
+            u.lastAttacker = owner;
+            u.lastAttackedT = ctx.time;
+          }
         }
       } else if (d < 8) {
-        u.takeDamage(p.damage, ctx);
+        // aspect: where the round strikes the hull matters
+        let aspect = 1;
+        if ((p.kind === 'SHELL' || p.kind === 'MISSILE_AIR') && owner && !u.isAir) {
+          const rel = angleOf(x - u.x, y - u.y);
+          const facing = Math.abs(
+            Math.atan2(Math.sin(rel - u.angle), Math.cos(rel - u.angle))
+          );
+          if (facing > Math.PI * 0.62) aspect = 1.65; // rear
+          else if (facing > Math.PI * 0.34) aspect = 1.3; // flank
+        }
+        u.takeDamage(p.damage, ctx, p.kind, owner ?? undefined, aspect);
+      } else if (d < 16 && (p.kind === 'SHELL' || p.kind === 'AUTO')) {
+        // rounds cracking past — suppressing even when they miss
+        u.suppression = Math.min(1, u.suppression + (p.kind === 'SHELL' ? 0.1 : 0.045));
       }
     }
   }

@@ -369,11 +369,20 @@ function SelectionBody({ hud }: { hud: HudSnapshot | null }) {
   return (
     <div className="flex-1 overflow-y-auto ps-scroll p-1.5 flex flex-col gap-[2px]">
       {lines.map((l) => (
-        <div key={l.callsign} className="grid grid-cols-[70px_34px_1fr_50px_50px] items-center gap-1 px-1 h-[19px]">
+        <div key={l.callsign} className="grid grid-cols-[70px_34px_1fr_46px_44px] items-center gap-1 px-1 h-[19px]">
           <span className="font-mono text-[9.5px] text-[#d9d6cc] truncate">{l.callsign}</span>
           <span className="font-mono text-[8px] text-[#5d584d]">{l.kind}</span>
-          <span className="font-mono text-[8px] text-[#8d887b] truncate">{l.activity}</span>
-          <MicroBar value={l.hp} max={l.hpMax} />
+          <span
+            className={`font-mono text-[8px] truncate ${
+              l.activity === 'PINNED' ? 'text-[#f3f1ea] ps-blink' : l.activity === 'SUPPRESSED' ? 'text-[#f3f1ea]' : 'text-[#8d887b]'
+            }`}
+          >
+            {l.activity}
+          </span>
+          <div className="flex flex-col gap-[2px]">
+            <MicroBar value={l.hp} max={l.hpMax} />
+            {l.suppression > 0.25 && <MicroBar value={1 - l.suppression} max={1} stress />}
+          </div>
           <AmmoCell value={l.ammo} max={l.ammoMax} />
         </div>
       ))}
@@ -402,6 +411,7 @@ function DetailBody({ hud }: { hud: HudSnapshot | null }) {
     ['VISION', `${ex.vision} m`],
     ['ARMOUR', ex.armor],
   ];
+  const sup = hud?.detailUnit?.suppression ?? 0;
   return (
     <div className="flex-1 min-h-0 flex">
       <div className="w-[190px] border-r border-[#242119] p-2 flex flex-col gap-1">
@@ -415,6 +425,14 @@ function DetailBody({ hud }: { hud: HudSnapshot | null }) {
             max={d.ammoMax}
             text={d.ammoMax > 100 ? `${d.ammo}` : `${d.ammo}/${d.ammoMax}`}
           />
+          {sup > 0.15 && (
+            <StatLine
+              label="SUPPRESSION"
+              value={1 - sup}
+              max={1}
+              text={sup > 0.85 ? 'PINNED' : `${Math.round(sup * 100)}%`}
+            />
+          )}
         </div>
       </div>
       <div className="flex-1 p-2 grid grid-cols-2 gap-x-3 gap-y-[5px] content-start">
@@ -443,10 +461,10 @@ function StatLine({ label, value, max, text }: { label: string; value: number; m
   );
 }
 
-function MicroBar({ value, max }: { value: number; max: number }) {
+function MicroBar({ value, max, stress }: { value: number; max: number; stress?: boolean }) {
   return (
-    <div className="ps-bar" style={{ height: 3 }}>
-      <i style={{ width: `${(value / max) * 100}%` }} />
+    <div className="ps-bar" style={{ height: stress ? 2 : 3, opacity: stress ? 0.9 : 1 }}>
+      <i style={{ width: `${(value / max) * 100}%`, background: stress ? '#8d887b' : undefined }} />
     </div>
   );
 }

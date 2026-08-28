@@ -502,6 +502,19 @@ export class Renderer {
       }
       ctx.restore();
 
+      // under fire: impacts kicking up around a suppressed unit —
+      // the battlefield tells you who is catching it
+      if (!ghost && u.suppression > 0.45 && Math.random() < 0.12) {
+        const a = Math.random() * Math.PI * 2;
+        const d = u.def.length * (0.5 + Math.random() * 0.6);
+        game.effects.spawnDust(
+          gx + Math.cos(a) * d,
+          gy + Math.sin(a) * d,
+          Math.cos(a) * 6,
+          Math.sin(a) * 6
+        );
+      }
+
       // selection
       if (selected && u.faction === 'FRIEND') {
         ctx.save();
@@ -527,6 +540,13 @@ export class Renderer {
           ctx.fillRect(gx - w / 2, yy, w, 2.6);
           ctx.fillStyle = '#141210';
           ctx.fillRect(gx - w / 2, yy, (w * u.hp) / u.def.hp, 2.6);
+          // suppression — a second, thinner stress bar under the hp
+          if (u.suppression > 0.2) {
+            ctx.fillStyle = 'rgba(243,241,234,0.7)';
+            ctx.fillRect(gx - w / 2, yy + 3.4, w, 1.6);
+            ctx.fillStyle = '#5a544a';
+            ctx.fillRect(gx - w / 2, yy + 3.4, w * u.suppression, 1.6);
+          }
         }
         ctx.restore();
       }
@@ -539,7 +559,11 @@ export class Renderer {
             sx: s.x,
             sy: s.y,
             hostile: false,
-            lines: [`${u.callsign} · ${u.def.shortName}`, u.getActivity(), `GRID ${u.positionGrid()}`],
+            lines: [
+              `${u.callsign} · ${u.def.shortName}`,
+              u.pinned ? 'PINNED DOWN' : u.suppression > 0.5 ? 'SUPPRESSED' : u.getActivity(),
+              `GRID ${u.positionGrid()}`,
+            ],
           });
         } else {
           hovers.push({

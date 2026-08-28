@@ -11,6 +11,7 @@ import type { EffectsSystem } from './effects';
 import type { ProjectileSystem } from './projectiles';
 import type { AudioEngine } from '../audio/audio';
 import type { InkEconomy } from '../systems/economy';
+import { coverFrom, findCoverSpot } from '../systems/cover';
 import { gridString } from '../core/math';
 
 export interface SimContext {
@@ -58,6 +59,17 @@ export class Unit {
   visibleTargets: Unit[] = [];
   fireMissionLeft = 0;
   fireMissionArea: Vec2 | null = null;
+  /** artillery target being tracked for corrected fire */
+  artyTrack: Unit | null = null;
+  /** last unit that fired on us — drives cover-seeking */
+  lastAttacker: Unit | null = null;
+  lastAttackedT = -999;
+
+  // ── suppression: the stress of being shot at ──
+  suppression = 0;
+  private supSeekCooldown = 0;
+  private standoffCheckT = 0;
+  private reconCheckT = 0;
 
   // orders
   order: Order = { type: 'HOLD' };
@@ -86,6 +98,10 @@ export class Unit {
   bank = 0;
   rearmT = 0;
   entryUsed = false;
+  /** committed attack run state */
+  runPhase: 'ORBIT' | 'INGRESS' | 'EGRESS' = 'ORBIT';
+  runTarget: Unit | null = null;
+  egressT = 0;
 
   // fx
   recoil = 0;
@@ -212,15 +228,140 @@ export class Unit {
     this.recoil = Math.max(0, this.recoil - dt * 8);
     if (this.def.kind === 'SPAA') this.radarAngle += dt * 1.35;
 
+    // suppression decays — troops recover their nerve
+    this.suppression = Math.max(0, this.suppression - dt * 0.065);
+    this.supSeekCooldown -= dt;
+    this.standoffCheckT -= dt;
+    this.reconCheckT -= dt;
+
     if (this.isAir) {
       this.updateAir(dt, ctx);
       return;
     }
 
+    this.updateRoleBehavior(dt, ctx);
     this.updateGroundMovement(dt, ctx);
     this.updateTargeting(dt, ctx);
     this.updateFiring(dt, ctx);
     this.updateSurfaceFx(dt, ctx);
+  }
+
+  get pinned(): boolean {
+    return this.suppression > 0.85;
+  }
+
+  /** aim quality multiplier — everything tactical converges here */
+  accuracyVs(t: Unit, ctx: SimContext): number {
+    let m = 1;
+    // firing on the move degrades gunnery
+    if (this.speedNow > this.def.speed * 0.25) m *= 0.72;
+    // a suppressed crew flinches
+    m *= 1 - 0.45 * this.suppression;
+    // high ground observes better
+    const dh = ctx.terrain.heightAt(this.x, this.y) - ctx.terrain.heightAt(t.x, t.y);
+    if (dh > 10) m *= 1.15;
+    else if (dh < -10) m *= 0.9;
+    // target movement
+    if (t.speedNow > t.def.speed * 0.5) m *= 0.82;
+    else if (t.speedNow < 0.5) m *= 1.08;
+    // cover on the target — the decisive factor
+    const cov = coverFrom(ctx, t.x, t.y, this.x, this.y);
+    m *= 1 - cov.value;
+    return clamp(m, 0.12, 1.25);
+  }
+
+  /** roles behave like they want to survive */
+  private updateRoleBehavior(dt: number, ctx: SimContext) {
+    void dt;
+    // artillery keeps distance from the fight
+    if (this.def.kind === 'SPG' && this.standoffCheckT <= 0) {
+      this.standoffCheckT = 4 + this.rng.range(0, 2);
+      let nearest: Unit | null = null;
+      let nd = Infinity;
+      for (const u of ctx.units) {
+        if (u.dead || u.faction === this.faction || u.isAir) continue;
+        const d = dist(this.x, this.y, u.x, u.y);
+        if (d < nd) {
+          nd = d;
+          nearest = u;
+        }
+      }
+      if (nearest && nd < 750 && this.fireMissionLeft <= 0) {
+        const away = angleOf(this.x - nearest.x, this.y - nearest.y);
+        const dest = {
+          x: clamp(this.x + Math.cos(away) * 620, 100, ctx.terrain.W - 100),
+          y: clamp(this.y + Math.sin(away) * 620, 100, ctx.terrain.H - 100),
+        };
+        this.orderMove(dest, ctx);
+        ctx.log(`${this.callsign} · DISPLACING — ENEMY INSIDE GUN RANGE`, 'alert');
+      }
+    }
+
+    // reconnaissance survives to scout again
+    if (this.def.kind === 'REC' && this.reconCheckT <= 0) {
+      this.reconCheckT = 3 + this.rng.range(0, 2);
+      let threat = 0;
+      let nearest: Unit | null = null;
+      let nd = Infinity;
+      for (const u of ctx.units) {
+        if (u.dead || u.faction === this.faction || u.isAir) continue;
+        if (u.def.kind === 'FACTORY' || u.def.kind === 'HQ') continue;
+        const d = dist(this.x, this.y, u.x, u.y);
+        if (d < 900) threat++;
+        if (d < nd) {
+          nd = d;
+          nearest = u;
+        }
+      }
+      const outnumbered = threat >= 2 && nearest && nd < 520;
+      // a player-given move order is respected — the scout flinches only
+      // when idle, or when it is genuinely fighting for its life
+      const executingOrder = (this.order.type === 'MOVE' || this.order.type === 'ATTACK_MOVE') && this.path.length > 0;
+      const mustBreak = this.hp < this.def.hp * 0.55 || (outnumbered && !executingOrder);
+      if (mustBreak && threat > 0) {
+        // fall back toward the nearest friendly armoured unit
+        let haven: Unit | null = null;
+        let hd = Infinity;
+        for (const u of ctx.units) {
+          if (u.dead || u.faction !== this.faction || u.isAir) continue;
+          if (u.def.kind !== 'MBT' && u.def.kind !== 'IFV') continue;
+          const d = dist(this.x, this.y, u.x, u.y);
+          if (d < hd) {
+            hd = d;
+            haven = u;
+          }
+        }
+        if (haven && hd > 140) {
+          const away = angleOf(haven.x - this.x, haven.y - this.y);
+          this.orderMove(
+            { x: haven.x + Math.cos(away) * 40, y: haven.y + Math.sin(away) * 40 },
+            ctx
+          );
+          ctx.log(`${this.callsign} · WITHDRAWING UNDER PRESSURE`, 'alert');
+        }
+      }
+    }
+
+    // under fire with no orders: seek nearby cover (both factions)
+    if (
+      this.suppression > 0.35 &&
+      this.supSeekCooldown <= 0 &&
+      (this.order.type === 'HOLD' || this.order.type === 'STOP') &&
+      this.path.length === 0 &&
+      this.lastAttacker &&
+      !this.lastAttacker.dead &&
+      ctx.time - this.lastAttackedT < 14
+    ) {
+      this.supSeekCooldown = 7;
+      const spot = findCoverSpot(ctx, this.x, this.y, this.lastAttacker.x, this.lastAttacker.y, 90);
+      if (spot && spot.value > 0.3) {
+        const current = coverFrom(ctx, this.x, this.y, this.lastAttacker.x, this.lastAttacker.y);
+        if (spot.value > current.value + 0.15) {
+          this.path = [{ x: spot.x, y: spot.y }];
+          this.dest = { x: spot.x, y: spot.y };
+        }
+      }
+    }
   }
 
   // ── ground movement ────────────────────────────────────────
@@ -282,20 +423,22 @@ export class Unit {
     const road = ctx.terrain.roadFactor(this.x, this.y);
     if (road > 0.3) terr *= 1.25;
 
-    const targetSpeed = this.def.speed * turnFactor * clamp(terr, 0.3, 1.35);
+    const targetSpeed =
+      this.def.speed * turnFactor * clamp(terr, 0.3, 1.35) * (1 - 0.35 * this.suppression) * (this.pinned ? 0.5 : 1);
     this.speedNow += clamp(targetSpeed - this.speedNow, -this.def.speed * 2 * dt, this.def.speed * 1.4 * dt);
 
     const step = this.speedNow * dt;
     this.x += Math.cos(this.angle) * step;
     this.y += Math.sin(this.angle) * step;
 
-    // separation from nearby friendly units
+    // separation from nearby units — vehicles keep fighting distance
     for (const o of ctx.units) {
       if (o === this || o.dead || o.isAir) continue;
       const od = dist(this.x, this.y, o.x, o.y);
-      const minD = (this.def.length + o.def.length) * 0.42;
+      const heavy = this.def.kind === 'MBT' || o.def.kind === 'MBT';
+      const minD = (this.def.length + o.def.length) * 0.42 + (heavy ? 20 : 12);
       if (od < minD && od > 0.01) {
-        const push = ((minD - od) / minD) * 26 * dt;
+        const push = ((minD - od) / minD) * 30 * dt;
         const a = angleOf(this.x - o.x, this.y - o.y);
         this.x += Math.cos(a) * push;
         this.y += Math.sin(a) * push;
@@ -353,7 +496,7 @@ export class Unit {
     // turret
     if (this.target) {
       const lead = this.def.projectile === 'SHELL' ? this.leadAngle(this.target, 470) : angleOf(this.target.x - this.x, this.target.y - this.y);
-      this.turretAngle = rotateToward(this.turretAngle, lead, this.def.turretRate * dt);
+      this.turretAngle = rotateToward(this.turretAngle, lead, this.def.turretRate * (1 - 0.5 * this.suppression) * dt);
     }
   }
 
@@ -375,7 +518,47 @@ export class Unit {
     // artillery fire missions (player-directed or AI-directed)
     if (this.def.projectile === 'ARTY') {
       if (this.fireMissionArea && this.fireMissionLeft > 0 && this.reloadT <= 0 && this.ammo > 0 && this.speedNow < 0.6) {
-        ctx.projectiles.fireArtillery(ctx, this, this.fireMissionArea.x, this.fireMissionArea.y, this.def.damage, this.def.splash, 38);
+        let ax = this.fireMissionArea.x;
+        let ay = this.fireMissionArea.y;
+        let quality = 1; // dispersion multiplier — lower is better
+        // corrected fire on a tracked target: live observation tightens the salvo
+        if (this.artyTrack && !this.artyTrack.dead) {
+          const observed = this.artyTrack.faction === 'ENEMY'
+            ? this.artyTrack.intel === 'DETECTED'
+            : ctx.units.some(
+                (u) => u.faction === 'ENEMY' && !u.dead && u.visibleTargets.includes(this.artyTrack!)
+              );
+          if (observed) {
+            ax = this.artyTrack.x;
+            ay = this.artyTrack.y;
+            quality = 0.85;
+            if (this.artyTrack.speedNow > 2) quality *= 1.6; // a moving target slips the bracket
+          } else {
+            ax = this.artyTrack.knownX;
+            ay = this.artyTrack.knownY;
+            quality = 2.4;
+            if (ctx.time - this.artyTrack.lastSeen > 30) this.artyTrack = null;
+          }
+        } else {
+          // area fire — is anyone observing the target area?
+          const observed = ctx.units.some(
+            (u) =>
+              !u.dead &&
+              u.faction === this.faction &&
+              !u.isAir &&
+              dist(u.x, u.y, ax, ay) < Math.max(600, u.def.vision * 0.65) &&
+              ctx.terrain.losClear(u.x, u.y, ctx.terrain.heightAt(u.x, u.y) + 4.5, ax, ay, ctx.terrain.heightAt(ax, ay) + 3)
+          );
+          quality = observed ? 1.35 : 4.0;
+        }
+        // shooter state widens the bracket
+        if (this.suppression > 0.3) quality *= 1 + (this.suppression - 0.3);
+        if (this.hp < this.def.hp * 0.5) quality *= 1.3;
+        // distance tells
+        const dFire = dist(this.x, this.y, ax, ay);
+        quality *= 1 + (dFire - 800) / 8000;
+
+        ctx.projectiles.fireArtillery(ctx, this, ax, ay, this.def.damage, this.def.splash, quality);
         this.ammo--;
         this.fireMissionLeft--;
         this.reloadT = this.def.reload;
@@ -384,6 +567,7 @@ export class Unit {
         if (this.fireMissionLeft === 0) {
           ctx.log(`${this.callsign} · FIRE MISSION COMPLETE`);
           this.fireMissionArea = null;
+          this.artyTrack = null;
         }
         if (this.ammo === 0) ctx.log(`${this.callsign} · AMMUNITION EXPENDED`, 'alert');
       }
@@ -396,7 +580,7 @@ export class Unit {
       if (this.burstT <= 0 && this.target && !this.target.dead) {
         this.burstT = this.def.burstInterval;
         this.burstLeft--;
-        ctx.projectiles.fireAuto(ctx, this, this.target.x, this.target.y, this.def.damage);
+        ctx.projectiles.fireAuto(ctx, this, this.target.x, this.target.y, this.def.damage, this.accuracyVs(this.target, ctx));
         this.ammo--;
         this.recoil = 0.4;
         this.lastFireT = ctx.time;
@@ -409,7 +593,8 @@ export class Unit {
     }
 
     if (!this.target || this.target.dead || this.reloadT > 0 || this.ammo <= 0) return;
-    if (this.stance === 'HOLD' && this.order.type === 'HOLD' && false) return;
+    // a pinned crew keeps its head down
+    if (this.pinned && this.rng.chance(0.6)) return;
 
     const d = dist(this.x, this.y, this.target.x, this.target.y);
     if (d > this.def.range || d < this.def.minRange) return;
@@ -426,7 +611,8 @@ export class Unit {
       }
     } else if (this.def.projectile === 'SHELL') {
       if (aligned < 0.05) {
-        ctx.projectiles.fireShell(ctx, this, this.target.x, this.target.y, this.def.damage, this.def.accuracy);
+        const acc = this.accuracyVs(this.target, ctx);
+        ctx.projectiles.fireShell(ctx, this, this.target.x, this.target.y, this.def.damage, this.def.accuracy * acc);
         this.ammo--;
         this.reloadT = this.def.reload;
         this.recoil = 1.0;
@@ -479,6 +665,57 @@ export class Unit {
 
       case 'INBOUND':
       case 'PATROL': {
+        const speed = this.def.speed;
+
+        // ── committed attack runs: dive, fire, egress, re-attack ──
+        if (this.runPhase === 'EGRESS') {
+          this.egressT -= dt;
+          // fly through — the aircraft does not linger over the target
+          const away = this.runTarget && !this.runTarget.dead ? angleOf(this.x - this.runTarget.x, this.y - this.runTarget.y) : this.angle;
+          const desired = this.angle + angDiff(this.angle, away) * 0.22;
+          const turn = clamp(angDiff(this.angle, desired), -this.def.turnRate * dt, this.def.turnRate * dt);
+          this.angle += turn;
+          this.bank = clamp(this.bank + (turn / (this.def.turnRate * dt || 1) - this.bank) * dt * 2.5, -1, 1);
+          this.x += Math.cos(this.angle) * speed * dt;
+          this.y += Math.sin(this.angle) * speed * dt;
+          if (this.egressT <= 0) {
+            this.runPhase = 'ORBIT';
+            this.runTarget = null;
+          }
+          break;
+        }
+
+        if (this.runPhase === 'INGRESS' && this.runTarget && !this.runTarget.dead) {
+          // straight at the target — commitment
+          const toT = angleOf(this.runTarget.x - this.x, this.runTarget.y - this.y);
+          const diff = angDiff(this.angle, toT);
+          const turn = clamp(diff, -this.def.turnRate * dt, this.def.turnRate * dt);
+          this.angle += turn;
+          this.bank = clamp(this.bank + (turn / (this.def.turnRate * dt || 1) - this.bank) * dt * 3, -1, 1);
+          this.x += Math.cos(this.angle) * speed * dt;
+          this.y += Math.sin(this.angle) * speed * dt;
+          const dd = dist(this.x, this.y, this.runTarget.x, this.runTarget.y);
+          if (dd < this.def.range && Math.abs(diff) < 0.35 && this.ammo > 0 && this.reloadT <= 0) {
+            // weapons away — then get out
+            ctx.projectiles.fireAGM(ctx, this, this.runTarget, this.def.damage, this.def.splash);
+            this.ammo--;
+            this.reloadT = this.def.reload;
+            this.runPhase = 'EGRESS';
+            this.egressT = 3.4 + this.rng.range(0, 1.6);
+            if (this.ammo === 0) {
+              ctx.log(`${this.callsign} · ORDnANCE EXPENDED — RTB`, 'info');
+              this.airState = 'RTB';
+              this.runPhase = 'ORBIT';
+              this.runTarget = null;
+            }
+          } else if (dd > 2400 || (dd < 120 && Math.abs(diff) > 2.2)) {
+            // overshoot — abort and reset
+            this.runPhase = 'EGRESS';
+            this.egressT = 2.6;
+          }
+          break;
+        }
+
         // orbit the patrol point
         const R = 640;
         const dx = this.x - this.patrol.x;
@@ -505,24 +742,27 @@ export class Unit {
           this.airState = 'PATROL';
         }
 
-        // engage ground targets in range while orbiting
+        // pick a target and begin the dive
         if (this.ammo > 0 && this.reloadT <= 0 && (this.airState === 'PATROL' || this.airState === 'INBOUND')) {
+          let best: Unit | null = null;
+          let bd = Infinity;
           for (const u of this.visibleTargets) {
             if (u.dead || u.isAir || u.def.kind === 'FACTORY') continue;
             const dd = dist(this.x, this.y, u.x, u.y);
-            if (dd < this.def.range) {
+            if (dd < 1900 && dd < bd) {
               const toT = angleOf(u.x - this.x, u.y - this.y);
-              if (Math.abs(angDiff(this.angle, toT)) < 0.4) {
-                ctx.projectiles.fireAGM(ctx, this, u, this.def.damage, this.def.splash);
-                this.ammo--;
-                this.reloadT = this.def.reload;
-                if (this.ammo === 0) {
-                  ctx.log(`${this.callsign} · ORDnANCE EXPENDED — RTB`, 'info');
-                  this.airState = 'RTB';
-                }
-                break;
+              // prefer targets roughly ahead
+              const off = Math.abs(angDiff(this.angle, toT));
+              const score = dd + off * 400;
+              if (score < bd) {
+                bd = score;
+                best = u;
               }
             }
+          }
+          if (best) {
+            this.runTarget = best;
+            this.runPhase = 'INGRESS';
           }
         }
         if (this.hp < this.def.hp * 0.4 && this.airState === 'PATROL') {
@@ -605,9 +845,9 @@ export class Unit {
 
   // ── damage ─────────────────────────────────────────────────
 
-  takeDamage(dmg: number, ctx: SimContext, projKind?: string) {
+  takeDamage(dmg: number, ctx: SimContext, projKind?: string, attacker?: Unit, aspect = 1) {
     if (this.dead) return;
-    let d = dmg;
+    let d = dmg * aspect;
     if (projKind === 'AUTO') {
       if (this.def.kind === 'MBT') d *= 0.28;
       else if (this.def.kind === 'IFV') d *= 0.7;
@@ -621,6 +861,12 @@ export class Unit {
     if (projKind === 'ARTY' && this.def.kind === 'FACTORY') d *= 1.15;
     this.hp -= d;
     this.damageFlash = 1;
+    // being hit is suppressing
+    this.suppression = Math.min(1, this.suppression + 0.12 + Math.min(0.24, d / 140));
+    if (attacker) {
+      this.lastAttacker = attacker;
+      this.lastAttackedT = ctx.time;
+    }
     if (this.hp <= 0) {
       this.hp = 0;
       this.die(ctx);
@@ -766,6 +1012,8 @@ export class Unit {
         case 'INBOUND':
           return 'PATROLLING';
         case 'PATROL':
+          if (this.runPhase === 'INGRESS') return 'ATTACK RUN';
+          if (this.runPhase === 'EGRESS') return 'ATTACK RUN';
           return this.target && !this.target.dead ? 'ATTACK RUN' : 'PATROLLING';
         case 'RTB':
           return 'RTB';
@@ -779,6 +1027,8 @@ export class Unit {
       return 'HOLDING';
     }
     if (this.isReinforcement) return 'INBOUND';
+    if (this.pinned) return 'PINNED';
+    if (this.suppression > 0.5) return 'SUPPRESSED';
     if (this.order.type === 'FIRE_MISSION') return 'FIRE MISSION';
     if (this.target && !this.target.dead) return this.reloadT > 0 ? 'RELOADING' : 'ENGAGING';
     if (this.path.length > 0) return 'MOVING';

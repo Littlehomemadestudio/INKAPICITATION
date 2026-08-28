@@ -42,19 +42,19 @@ export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
   add('M109A7', 'FRIEND', 300, 2700, 'HAMMER 2', -0.55);
   add('A10C', 'FRIEND', 200, 3200, 'TALON 1', -0.9);
 
-  // ── PL ECHO — crossroads village ───────────────────────────
+  // ── PL ECHO — crossroads village, dug in on the trench line ──
   const ECHO: Vec2 = { x: 2190, y: 1850 };
-  add('T90M', 'ENEMY', 2150, 1755, 'ECHO 1', Math.PI * 0.62, { x: 2150, y: 1755 });
+  add('T90M', 'ENEMY', 2150, 1716, 'ECHO 1', Math.PI * 0.62, { x: 2150, y: 1716 });
   add('T90M', 'ENEMY', 2270, 1795, 'ECHO 2', Math.PI * 0.55, { x: 2270, y: 1795 });
-  add('BMP3', 'ENEMY', 2100, 1910, 'ECHO 3', Math.PI * 0.65, { x: 2100, y: 1910 });
+  add('BMP3', 'ENEMY', 2220, 1708, 'ECHO 3', Math.PI * 0.65, { x: 2220, y: 1708 });
   add('BMP3', 'ENEMY', 2300, 1945, 'ECHO 4', Math.PI * 0.6, { x: 2300, y: 1945 });
-  add('BTR82A', 'ENEMY', 2380, 1740, 'ECHO 5', Math.PI * 0.5, { x: 2380, y: 1740 });
+  add('BTR82A', 'ENEMY', 2305, 1762, 'ECHO 5', Math.PI * 0.5, { x: 2305, y: 1762 });
 
-  // ── PL FOXTROT — Hill 214 ──────────────────────────────────
+  // ── PL FOXTROT — Hill 214, hull-down on the shoulders ────
   const FOXTROT: Vec2 = { x: 2950, y: 1180 };
-  add('T90M', 'ENEMY', 2890, 1110, 'FOXTROT 1', Math.PI * 0.75, { x: 2890, y: 1110 });
+  add('T90M', 'ENEMY', 2905, 1062, 'FOXTROT 1', Math.PI * 0.75, { x: 2905, y: 1062 });
   add('T90M', 'ENEMY', 3020, 1195, 'FOXTROT 2', Math.PI * 0.8, { x: 3020, y: 1195 });
-  add('BMP3', 'ENEMY', 2850, 1255, 'FOXTROT 3', Math.PI * 0.7, { x: 2850, y: 1255 });
+  add('BMP3', 'ENEMY', 3050, 1242, 'FOXTROT 3', Math.PI * 0.7, { x: 3050, y: 1242 });
   add('TOR', 'ENEMY', 3090, 1085, 'AD 1', Math.PI * 0.8, { x: 3090, y: 1085 });
 
   // ── HQ KRAKEN — NE compound ────────────────────────────────
@@ -67,7 +67,7 @@ export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
   // reserve
   add('T90M', 'ENEMY', 3530, 715, 'RES 1', Math.PI * 0.9, { x: 3530, y: 715 });
   add('T90M', 'ENEMY', 3610, 770, 'RES 2', Math.PI * 0.9, { x: 3610, y: 770 });
-  add('BMP3', 'ENEMY', 3480, 790, 'RES 3', Math.PI * 0.9, { x: 3480, y: 790 });
+  add('BMP3', 'ENEMY', 3425, 806, 'RES 3', Math.PI * 0.9, { x: 3425, y: 806 });
 
   // ── ink works — the economic objectives ────────────────────
   for (const site of terrain.factories) {
@@ -79,11 +79,11 @@ export function buildScenario(seed: number, terrain: Terrain): ScenarioData {
     f.intel = 'DETECTED';
     units.push(f);
     if (site.id === 'MOLOT9') {
-      add('T90M', 'ENEMY', site.x - 150, site.y + 90, 'MOLOT 1', Math.PI * 0.8, { x: site.x - 150, y: site.y + 90 });
-      add('BMP3', 'ENEMY', site.x + 130, site.y + 120, 'MOLOT 2', Math.PI * 0.75, { x: site.x + 130, y: site.y + 120 });
+      add('T90M', 'ENEMY', site.x - 55, site.y + 108, 'MOLOT 1', Math.PI * 0.8, { x: site.x - 55, y: site.y + 108 });
+      add('BMP3', 'ENEMY', site.x + 20, site.y + 106, 'MOLOT 2', Math.PI * 0.75, { x: site.x + 20, y: site.y + 106 });
     }
     if (site.id === 'ZAVOD7') {
-      add('BMP3', 'ENEMY', site.x - 170, site.y + 60, 'ZAVOD 1', Math.PI * 0.6, { x: site.x - 170, y: site.y + 60 });
+      add('BMP3', 'ENEMY', site.x - 125, site.y + 12, 'ZAVOD 1', Math.PI * 0.6, { x: site.x - 125, y: site.y + 12 });
       add('BTR82A', 'ENEMY', site.x + 150, site.y - 80, 'ZAVOD 2', Math.PI * 0.55, { x: site.x + 150, y: site.y - 80 });
       add('TOR', 'ENEMY', site.x + 60, site.y + 170, 'AD 4', Math.PI * 0.6, { x: site.x + 60, y: site.y + 170 });
     }
@@ -148,9 +148,9 @@ export const BRIEFING = {
   mission:
     'TASK FORCE SABRE will cross the river, take the ground that pays, and neutralise the KRAKEN command post. Every bridge, hill and works you hold widens your margin of superiority.',
   execution: [
-    'PHASE 1 — Reconnoitre. Push SCOUT sections across the northern bridge or along the MSR. High ground sees further; ridgelines hide what is behind them.',
-    'PHASE 2 — Economise. Occupy ZAVOD 3 to open your first ink line. Clear NOVY MOST and the crossings. Task HAMMER against identified positions.',
-    'PHASE 3 — Break. Fix the defenders, destroy them with armour and mechanised infantry, and push for the plateau. TALON is available on call — watch for enemy air defence.',
+    'PHASE 1 — Reconnoitre. Push SCOUT sections across the northern bridge or along the MSR. High ground sees further; ridgelines and buildings mask what lies behind them. The enemy is dug in — trench lines read as broken dark scars with a berm behind.',
+    'PHASE 2 — Soften. Artillery fire scatters: observed targets are hit hard, blind area fire wastes shells. Keep eyes on a target and your guns will walk onto it — order artillery onto an enemy unit directly for corrected fire. Stone walls, buildings, ruins and wrecks shelter whoever holds them; suppress defenders with fire before you cross.',
+    'PHASE 3 — Break. Fix the defenders, flank their cover, strike their flanks and rear — hits from bad angles hurt far more. Attack aircraft strike in committed passes and egress. TALON is available on call — watch for enemy air defence.',
     'END STATE — KRAKEN HQ destroyed. The works you hold decide how expensive the victory was.',
   ],
   forces: [

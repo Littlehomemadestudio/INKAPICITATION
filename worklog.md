@@ -66,3 +66,29 @@ Stage Summary:
 - Core loop now visible end-to-end: base ink → scout → capture ground & ink works → deploy battalions at assembly → fight for sectors → bounties → expand → destroy KRAKEN HQ.
 - Key files: `src/game/systems/economy.ts` (new), `world/terrain.ts` + `render/terrainRender.ts` (rewritten), `Game.ts`, `units.ts`, `vision.ts`, `ai.ts`, `scenario.ts`, `renderer.ts`, `entities/effects.ts`, HUD (`HudBars.tsx`, `Overlays.tsx`, `globals.css`).
 - Art screenshots archived in `/home/z/my-project/download/shots/v11-*.png`.
+
+---
+Task ID: 3
+Agent: Super Z (main agent)
+Task: REFINEMENT — make combat tactical and physical (Men of War philosophy): cover, LOS, suppression, artillery uncertainty, committed aircraft, formation discipline.
+
+Work Log:
+- COVER SYSTEM (NEW `systems/cover.ts`): directional coverFrom(ctx, x, y, fromX, fromY) → {value, type} — hard (buildings/ruins/bunkers/factories 0.5-0.66, stone walls 0.58, boulders 0.5, wrecks 0.45, rubble 0.5), soft (forest 0.18-0.4), trench (0.72). Directionality: object must lie between unit and threat (angle test). findCoverSpot() scores anchors (walls/buildings/rocks/trench points) for cover-seeking AI.
+- TERRAIN FORTIFICATIONS (`world/terrain.ts`): 7 zigzag trench lines with berms at PL ECHO / FOXTROT / HQ / ZAVOD7 / MOLOT9; 15 stone field walls near the fight; 38 dragon's-teeth barriers at bridges/ford/gates; 4 RUIN buildings at the front line; building spatial hash (128 m) + buildingsNear/buildingFootprintAt/trenchDist/wallNear; precomputed 16 m building occupancy mask for O(1) LOS samples; trench cost +1.4 in pathfinding grid; trees excluded from trenches/walls.
+- LOS: losClear() now blocks beams through building footprints (mask grid; masts/checkpoints see-through; aircraft above). Vision → no shooting through walls; ambush/flank geometry works (verified: LOS through a town HOUSE blocked, beside it clear).
+- SUPPRESSION: unit.suppression 0..1 — from hits (+0.12+dmg/140), near-miss arty splash (+0.32×proximity), shell cracks within 16 m (+0.1), AUTO misses (+0.045); decays 0.065/s. Effects: accuracy ×(1-0.45·sup), vision ×(1-0.3·sup), speed ×(1-0.35·sup), turret slew ×(1-0.5·sup); >0.85 = PINNED (60% hold fire, half speed); 0.5+ = SUPPRESSED label. Visuals: dust impacts around suppressed units, gray stress bar under HP (selected), HUD rows + detail panel SUPPRESSION stat, hover "PINNED DOWN"/"SUPPRESSED".
+- ACCURACY MODEL: Unit.accuracyVs() — firing on move ×0.72, suppressed shooter, high ground ×1.15 / low ×0.9, target moving ×0.82 / static ×1.08, target cover ×(1-cover). Applied to SHELL accuracy and AUTO miss radius. Aspect damage: rear ×1.65, flank ×1.3 (verified math).
+- ARTILLERY UNCERTAINTY: elliptical dispersion (along-track σ 26·quality, across ×0.62, gaussian-ish) — quality from intel: tracked+observed 0.85, tracked lost 2.4, area observed 1.35, blind 4.0; shooter suppressed/damaged/distance widen it. Right-click enemy with artillery selected = TRACKED fire mission (artyTrack) that walks onto the target while observed (verified: ECHO 4 destroyed by corrected fire; blind fire scattered 3-91 m, mean 30).
+- ROLE BEHAVIOR: SPGs displace when enemy <750 m; recon withdraws toward armour when idle+outnumbered or hp<55% (player orders respected — only flinches when idle or critical); under-fire units with HOLD/STOP orders seek nearby cover via findCoverSpot (verified HAMMER moved to wall-side spot).
+- FORMATIONS: separation min distance +12-20 m by class; formation spread 54-84 m by role (MBT 78, SPG 84, IFV 62, REC 54). Verified min spacing 63 m in assault column.
+- AIRCRAFT: committed attack runs — ORBIT → INGRESS (dive at target) → weapons away → EGRESS (fly-through 3.4-5 s) → re-attack; abort on overshoot (verified: TALON fired 2+2 missiles across two passes, ATTACK RUN activity).
+- AUDIO: jet engine rewritten — filtered noise turbofan (loop) + buried 54 Hz rotor tone, band-limited, max gain 0.16 (was 0.24 sawtooth drone), 0.55 s swell/fade envelopes, gentle doppler rate shift by closing speed, brightness by proximity, stereo pan, plus one-shot jetPassby() swell when crossing the camera (throttled 1.2 s).
+- SCENARIO: PL ECHO/FOXTROT defenders re-positioned into the trench lines (trenchDist 5.1 m verified); briefing/help updated with THE TACTICAL SHEET section (cover, LOS, suppression, dispersion, aspect, attack runs).
+- BALANCE: enemy base income 2.6→2.0, unit cap 22→16 (their economy was massing 9 extra T-90s and wiping unsupported assaults — now the defense is strong but beatable with combined arms: verified observed arty kills dug-in defenders, assault under barrage suppresses them).
+- PERF: building-mask LOS grid replaced per-sample spatial-hash lookups; 35 FPS in active battle at mid-zoom on software-rendered headless (60 strategic; render-only 60; sim <0.2 ms/step).
+- Verified end-to-end in browser: fortification generation (7/15/38/4), cover ratings, building LOS block, suppression accumulate→PINNED→decay, cover-seeking, tracked vs blind artillery, aircraft run phases, recon order-respect fix, spacing, enemy suppression in battle (ECHO 2 SUPPRESSED 0.58 under barrage), VLM art reviews of trench/wall/tactical-fight/HUD (all pass, "Men of War philosophy strongly evident").
+
+Stage Summary:
+- Deliverable: PAPER STORM V1.2 "THE TACTICAL SHEET" at `/` — combat is now cover/LOS/positioning-driven: a smaller force using terrain beats a blind larger one; artillery is a weapon of observation, not precision; aircraft strike and leave; units behave like they want to survive.
+- Key files: NEW `src/game/systems/cover.ts`; `world/terrain.ts`, `entities/units.ts`, `entities/projectiles.ts`, `systems/vision.ts`, `audio/audio.ts`, `render/terrainRender.ts`, `render/renderer.ts`, `systems/input.ts`, `world/scenario.ts`, `core/types.ts`, `Game.ts`, HUD `HudBars.tsx`/`Overlays.tsx`.
+- Art screenshots: `download/shots/v12-*.png`.

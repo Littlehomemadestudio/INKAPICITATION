@@ -323,6 +323,9 @@ export class Game {
       if (flying) {
         this.audio.startEngine(u.id, u.x, u.y);
         this.audio.updateEngine(u.id, u.x, u.y, true);
+        // the fly-by swell as it crosses the camera
+        const d = Math.hypot(u.x - this.camera.x, u.y - this.camera.y);
+        if (d < 420) this.audio.jetPassby(u.x, u.y);
       } else {
         this.audio.stopEngine(u.id);
       }
@@ -440,6 +443,7 @@ export class Game {
       ammo: u.ammo,
       ammoMax: u.def.ammo,
       selected: true,
+      suppression: Math.round(u.suppression * 100) / 100,
     }));
     const detail = sel.length === 1 ? lines[0] : null;
     const detailUnit = sel.length === 1 ? sel[0] : null;
@@ -477,6 +481,7 @@ export class Game {
             speedKph: Math.round(detailUnit.def.speed * 3.6),
             vision: detailUnit.def.vision,
             armor: detailUnit.def.kind === 'MBT' ? 'HEAVY' : detailUnit.def.kind === 'IFV' ? 'MEDIUM' : 'LIGHT',
+            suppression: Math.round(detailUnit.suppression * 100),
           }
         : null,
       log: this.logEntries.slice(0, 8),

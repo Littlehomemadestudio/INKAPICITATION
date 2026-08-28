@@ -31,7 +31,8 @@ export type BuildingKind =
   | 'STORAGE_TANK'
   | 'DEPOT'
   | 'SUBSTATION'
-  | 'CHECKPOINT';
+  | 'CHECKPOINT'
+  | 'RUIN';
 
 export interface Building {
   x: number;
@@ -62,6 +63,26 @@ export interface RockPoint {
   y: number;
   r: number;
   seed: number;
+}
+
+/** a dug fighting position — zigzag trench with a berm */
+export interface Trench {
+  pts: Vec2[];
+}
+
+/** dry stone field wall */
+export interface StoneWall {
+  x: number;
+  y: number;
+  len: number;
+  rot: number;
+}
+
+/** concrete anti-vehicle obstacle (dragon's tooth) */
+export interface Barrier {
+  x: number;
+  y: number;
+  rot: number;
 }
 
 export interface FactorySite {
@@ -104,6 +125,9 @@ export class Terrain {
   rocks: RockPoint[] = [];
   pylons: Vec2[] = [];
   powerLine: Vec2[] = [];
+  trenches: Trench[] = [];
+  walls: StoneWall[] = [];
+  barriers: Barrier[] = [];
   factories: FactorySite[] = [];
   fields: { x: number; y: number; w: number; h: number; rot: number; tone: number }[] = [];
   labels: { x: number; y: number; text: string; size: number; bold?: boolean }[] = [];
@@ -120,9 +144,16 @@ export class Terrain {
   private hg!: Float32Array;
   private hgw = 0;
   private hgh = 0;
+  // static building occupancy mask (16 m cells) for fast LOS
+  private bmask!: Uint8Array;
+  private bmw = 0;
+  private bmh = 0;
+  private readonly BM_CELL = 16;
 
   // tree spatial hash
   private treeGrid: Map<number, TreePoint[]> = new Map();
+  // building spatial hash (cover + LOS queries)
+  private bldGrid: Map<number, Building[]> = new Map();
 
   contours: ContourSet | null = null;
 
@@ -207,8 +238,9 @@ export class Terrain {
 
   // ── LOS over the height grid ───────────────────────────────
 
-  /** terrain line of sight between two points at given eye heights */
-  losClear(ax: number, ay: number, aEye: number, bx: number, by: number, bEye: number): boolean {
+  /** terrain line of sight between two points at given eye heights;
+   *  buildings interrupt observation and direct fire */
+  losClear(ax: number, ay: number, aEye: number, bx: number, by: number, bEye: number, includeBuildings = true): boolean {
     const d = dist(ax, ay, bx, by);
     const steps = Math.max(2, Math.ceil(d / 56));
     for (let s = 1; s < steps; s++) {
@@ -218,6 +250,22 @@ export class Terrain {
       const beam = aEye + (bEye - aEye) * t;
       const ground = this.gridHeight(x, y);
       if (ground > beam + 2.0) return false;
+    }
+    if (includeBuildings) {
+      // sample the beam against building footprints (they are tall enough
+      // to matter to a ground-level observer; aircraft pass above)
+      if (aEye < 30 && bEye < 30) {
+        const bsteps = Math.max(2, Math.ceil(d / 16));
+        for (let s = 1; s < bsteps; s++) {
+          const t = s / bsteps;
+          const x = ax + (bx - ax) * t;
+          const y = ay + (by - ay) * t;
+          const gx = (x / this.BM_CELL) | 0;
+          const gy = (y / this.BM_CELL) | 0;
+          if (gx < 0 || gy < 0 || gx >= this.bmw || gy >= this.bmh) continue;
+          if (this.bmask[gy * this.bmw + gx]) return false;
+        }
+      }
     }
     return true;
   }
@@ -472,6 +520,15 @@ export class Terrain {
     ];
     this.pylons = this.powerLine.map((p) => ({ ...p }));
 
+    // ── field fortifications — the defensive landscape ───────
+    this.buildFortifications(rng);
+
+    // ── pre-war ruins near the front line ─────────────────────
+    this.buildings.push({ x: 2515, y: 1655, w: 22, h: 15, rot: 0.3, kind: 'RUIN' });
+    this.buildings.push({ x: 2560, y: 1690, w: 14, h: 11, rot: -0.15, kind: 'RUIN' });
+    this.buildings.push({ x: 1405, y: 1560, w: 18, h: 13, rot: 0.5, kind: 'RUIN' });
+    this.buildings.push({ x: 2660, y: 1560, w: 16, h: 12, rot: 0.1, kind: 'RUIN' });
+
     // ── rocks — boulder fields on the steep ground ─────────
     this.rocks = [];
     for (let i = 0; i < 2600; i++) {
@@ -510,6 +567,8 @@ export class Terrain {
         if (this.roadFactor(jx, jy) > 0.08 || this.railFactor(jx, jy) > 0.15) continue;
         if (this.slopeAt(jx, jy) > 0.17) continue;
         if (this.buildingAt(jx, jy, 34)) continue;
+        if (this.trenchDist(jx, jy) < 14) continue;
+        if (this.wallNear(jx, jy, 8)) continue;
         this.trees.push({ x: jx, y: jy, r: rng.range(6.5, 12.5), seed: rng.next() });
       }
     }
@@ -573,6 +632,17 @@ export class Terrain {
       arr.push(t);
     }
 
+    // building spatial hash
+    for (const b of this.buildings) {
+      const key = Math.floor(b.x / 128) * 100000 + Math.floor(b.y / 128);
+      let arr = this.bldGrid.get(key);
+      if (!arr) {
+        arr = [];
+        this.bldGrid.set(key, arr);
+      }
+      arr.push(b);
+    }
+
     // ── labels & spot heights ─────────────────────────────────
     this.labels = [
       { x: 2950, y: 1180, text: 'HILL 214', size: 30, bold: true },
@@ -612,6 +682,87 @@ export class Terrain {
 
     // contour extraction
     this.contours = this.extractContours();
+  }
+
+  /** the deliberate defensive works — trenches, walls, barriers */
+  private buildFortifications(rng: RNG) {
+    this.trenches = [];
+    this.walls = [];
+    this.barriers = [];
+
+    const zigzag = (cx: number, cy: number, len: number, baseAng: number, n: number): Trench => {
+      // a dug position: alternating legs of a fire trench
+      const pts: Vec2[] = [];
+      const legLen = len / n;
+      let x = cx - (Math.cos(baseAng) * len) / 2;
+      let y = cy - (Math.sin(baseAng) * len) / 2;
+      pts.push({ x, y });
+      for (let i = 0; i < n; i++) {
+        const a = baseAng + (i % 2 === 0 ? 0.55 : -0.55);
+        x += Math.cos(a) * legLen;
+        y += Math.sin(a) * legLen;
+        pts.push({ x: x + rng.range(-3, 3), y: y + rng.range(-3, 3) });
+      }
+      return { pts };
+    };
+
+    // PL ECHO defensive line north of the town — faces the player's axis
+    this.trenches.push(zigzag(2170, 1712, 190, Math.PI * 0.06, 6));
+    this.trenches.push(zigzag(2305, 1760, 130, Math.PI * 0.32, 4));
+    // PL FOXTROT — two positions on the hill shoulders
+    this.trenches.push(zigzag(2885, 1080, 170, Math.PI * 0.78, 5));
+    this.trenches.push(zigzag(3045, 1245, 120, Math.PI * 0.72, 4));
+    // HQ perimeter — south face
+    this.trenches.push(zigzag(3425, 800, 220, Math.PI * 0.08, 7));
+    // ZAVOD 7 perimeter — west face
+    this.trenches.push(zigzag(3225, 1760, 150, Math.PI * 0.62, 5));
+    // MOLot 9 perimeter — south face
+    this.trenches.push(zigzag(1500, 985, 140, Math.PI * 0.1, 5));
+
+    // stone walls — field boundaries that double as cover
+    // (complement the treelines: the farmland reads as a defensive maze)
+    const wallSpots: [number, number, number, number][] = [
+      // near NOVY MOST — the close fight
+      [2080, 1780, 120, 0.35],
+      [2295, 1915, 110, 0.25],
+      [2135, 1975, 130, -0.1],
+      [2400, 1830, 100, 0.9],
+      // west approach along the E–W highway
+      [1750, 1905, 150, 0.08],
+      [1600, 1985, 120, -0.2],
+      [1850, 2010, 110, 0.05],
+      // hill 214 approaches
+      [2700, 1390, 140, 0.5],
+      [2815, 1300, 110, 0.6],
+      [3080, 1120, 120, 0.75],
+      // south farms belt
+      [1980, 2560, 160, 0.02],
+      [2140, 2640, 130, -0.15],
+      [2320, 2700, 120, 0.3],
+      // north track approach
+      [1350, 1330, 120, 0.4],
+      [1480, 1220, 110, 0.35],
+    ];
+    for (const [x, y, len, rot] of wallSpots) {
+      this.walls.push({ x: x + rng.range(-8, 8), y: y + rng.range(-8, 8), len: len * rng.range(0.85, 1.1), rot: rot + rng.range(-0.06, 0.06) });
+    }
+
+    // dragon's teeth — anti-vehicle obstacles at the choke points
+    const barrierFields: [number, number, number][] = [
+      [2125, 1818, 7],   // town bridge approach
+      [2390, 1840, 6],   // east bridge approach
+      [3320, 660, 8],    // HQ south entrance
+      [3295, 1820, 6],   // ZAVOD 7 west gate
+      [2975, 2175, 6],   // the ford
+      [1225, 1435, 5],   // north bridge
+    ];
+    for (const [bx, by, n] of barrierFields) {
+      for (let i = 0; i < n; i++) {
+        const a = rng.range(0, Math.PI * 2);
+        const d = rng.range(0, 26);
+        this.barriers.push({ x: bx + Math.cos(a) * d, y: by + Math.sin(a) * d, rot: rng.range(0, Math.PI) });
+      }
+    }
   }
 
   // ── settlement builders ────────────────────────────────────
@@ -747,6 +898,71 @@ export class Terrain {
     return null;
   }
 
+  /** exact rotated-rect footprint test — used for LOS and cover */
+  buildingFootprintAt(x: number, y: number): Building | null {
+    const near = this.buildingsNear(x, y, 4);
+    for (const b of near) {
+      const dx = x - b.x;
+      const dy = y - b.y;
+      const c = Math.cos(-b.rot);
+      const s = Math.sin(-b.rot);
+      const lx = dx * c - dy * s;
+      const ly = dx * s + dy * c;
+      if (Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2) return b;
+    }
+    return null;
+  }
+
+  /** buildings whose centre is within r of the point */
+  buildingsNear(x: number, y: number, r: number): Building[] {
+    const out: Building[] = [];
+    const CELL = 128;
+    const c0x = Math.floor((x - r) / CELL);
+    const c1x = Math.floor((x + r) / CELL);
+    const c0y = Math.floor((y - r) / CELL);
+    const c1y = Math.floor((y + r) / CELL);
+    for (let cy = c0y; cy <= c1y; cy++) {
+      for (let cx = c0x; cx <= c1x; cx++) {
+        const arr = this.bldGrid.get(cx * 100000 + cy);
+        if (arr) out.push(...arr);
+      }
+    }
+    return out;
+  }
+
+  /** distance to the nearest trench line */
+  trenchDist(x: number, y: number): number {
+    let best = Infinity;
+    for (const t of this.trenches) {
+      const d = this.distToPolyline(x, y, t.pts);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  /** nearest stone wall within r */
+  wallNear(x: number, y: number, r: number): StoneWall | null {
+    let best: StoneWall | null = null;
+    let bd = r;
+    for (const w of this.walls) {
+      const d = dist(x, y, w.x, w.y);
+      if (d < Math.max(w.len * 0.5, bd) && d < bd) {
+        // rough test against the wall segment
+        const c = Math.cos(w.rot);
+        const s = Math.sin(w.rot);
+        const dx = x - w.x;
+        const dy = y - w.y;
+        const lx = dx * c + dy * s;
+        const ly = -dx * s + dy * c;
+        if (Math.abs(lx) <= w.len / 2 + 3 && Math.abs(ly) <= 10) {
+          bd = Math.max(2, Math.abs(ly));
+          best = w;
+        }
+      }
+    }
+    return best;
+  }
+
   // ── contour extraction (marching squares) ──────────────────
 
   private extractContours(): ContourSet {
@@ -866,6 +1082,7 @@ export class Terrain {
           if (r > 0.05) c = Math.min(c, r > 0.5 ? 0.34 : 0.6);
           if (this.railFactor(cx, cy) > 0.4) c += 1.2;
           if (this.buildingAt(cx, cy, 10)) c += 5;
+          if (this.trenchDist(cx, cy) < 8) c += 1.4; // crossing a dug position
           if (this.bridgeAt(cx, cy, CELL * 0.9)) c = 0.5;
         }
         this.cost[gy * this.gw + gx] = c;
@@ -880,6 +1097,33 @@ export class Terrain {
     for (let j = 0; j < this.hgh; j++) {
       for (let i = 0; i < this.hgw; i++) {
         this.hg[j * this.hgw + i] = this.heightAt(i * HG_STEP, j * HG_STEP);
+      }
+    }
+    // building occupancy mask — rasterize every footprint once
+    this.bmw = Math.ceil(this.W / this.BM_CELL) + 1;
+    this.bmh = Math.ceil(this.H / this.BM_CELL) + 1;
+    this.bmask = new Uint8Array(this.bmw * this.bmh);
+    for (const b of this.buildings) {
+      if (b.kind === 'MAST' || b.kind === 'CHECKPOINT') continue; // see-through
+      const c = Math.cos(b.rot);
+      const s = Math.sin(b.rot);
+      const reach = Math.max(b.w, b.h) * 0.5;
+      const gx0 = Math.max(0, ((b.x - reach) / this.BM_CELL) | 0);
+      const gx1 = Math.min(this.bmw - 1, ((b.x + reach) / this.BM_CELL) | 0);
+      const gy0 = Math.max(0, ((b.y - reach) / this.BM_CELL) | 0);
+      const gy1 = Math.min(this.bmh - 1, ((b.y + reach) / this.BM_CELL) | 0);
+      for (let gy = gy0; gy <= gy1; gy++) {
+        for (let gx = gx0; gx <= gx1; gx++) {
+          const px = gx * this.BM_CELL + this.BM_CELL / 2;
+          const py = gy * this.BM_CELL + this.BM_CELL / 2;
+          const dx = px - b.x;
+          const dy = py - b.y;
+          const lx = dx * c + dy * s;
+          const ly = -dx * s + dy * c;
+          if (Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2) {
+            this.bmask[gy * this.bmw + gx] = 1;
+          }
+        }
       }
     }
   }

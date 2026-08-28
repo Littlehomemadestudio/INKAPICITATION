@@ -24,7 +24,9 @@ export type UnitActivity =
   | 'RTB'
   | 'REARMING'
   | 'DESTROYED'
-  | 'INBOUND';
+  | 'INBOUND'
+  | 'SUPPRESSED'
+  | 'PINNED';
 
 export type OrderType = 'MOVE' | 'ATTACK' | 'ATTACK_MOVE' | 'STOP' | 'HOLD' | 'FIRE_MISSION' | 'PATROL';
 
@@ -89,6 +91,7 @@ export interface HudUnitLine {
   ammo: number;
   ammoMax: number;
   selected: boolean;
+  suppression: number;
 }
 
 /** one purchasable formation in the deployment roster */
@@ -130,6 +133,7 @@ export interface HudSnapshot {
     speedKph: number;
     vision: number;
     armor: string;
+    suppression: number;
   } | null;
   log: LogEntry[];
   air: { callsign: string; state: string; missiles: number; hp: number }[];

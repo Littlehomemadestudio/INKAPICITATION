@@ -293,7 +293,10 @@ export class InputSystem {
       for (const u of direct) u.orderAttack(enemy, this.game.simCtx());
       for (const u of arty) {
         u.orderFireMission({ x: enemy.x, y: enemy.y });
-        this.game.log(`${u.callsign} · FIRE MISSION — GRID ${enemy.positionGrid()}`);
+        // corrected fire: the battery tracks this target — the salvo
+        // tightens while someone keeps eyes on it
+        u.artyTrack = enemy;
+        this.game.log(`${u.callsign} · TRACKED FIRE MISSION — ${enemy.def.shortName}`);
       }
       this.game.effects.orderMarker(enemy.x, enemy.y, 'attack');
       return;
@@ -336,13 +339,16 @@ export class InputSystem {
   private formationMove(units: Unit[], dest: { x: number; y: number }, attackMove = false) {
     const ang = Math.atan2(dest.y - units[0].y, dest.x - units[0].x);
     const perp = ang + Math.PI / 2;
-    const spacing = 62;
+    // spacing by role: armour fights at arm's length
+    const spacingFor = (u: Unit) =>
+      u.def.kind === 'MBT' ? 78 : u.def.kind === 'IFV' ? 62 : u.def.kind === 'SPG' ? 84 : 54;
     const cols = Math.ceil(Math.sqrt(units.length));
     units.forEach((u, i) => {
       const col = i % cols;
       const row = Math.floor(i / cols);
+      const spacing = spacingFor(u);
       const ox = (col - (cols - 1) / 2) * spacing;
-      const oy = (row - (Math.ceil(units.length / cols) - 1) / 2) * spacing * 1.35;
+      const oy = (row - (Math.ceil(units.length / cols) - 1) / 2) * spacing * 1.3;
       const px = dest.x + Math.cos(perp) * ox - Math.cos(ang) * oy;
       const py = dest.y + Math.sin(perp) * ox - Math.sin(ang) * oy;
       if (attackMove) u.orderAttackMove({ x: px, y: py }, this.game.simCtx());

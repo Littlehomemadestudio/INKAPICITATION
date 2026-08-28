@@ -315,6 +315,19 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
         </div>
         <hr className="ps-rule mb-6" />
         <div className="font-mono text-[9px] tracking-[0.24em] text-[#6b6557] mb-2 border-b border-[#ddd9cd] pb-1">
+          THE TACTICAL SHEET
+        </div>
+        <div className="grid grid-cols-2 gap-x-8 gap-y-[5px] mb-6">
+          <p className="text-[11.5px] leading-relaxed text-[#4c473d] col-span-2">
+            The ground fights with you or against you. Reconnaissance reveals the enemy; forests conceal; ridgelines,
+            buildings and ruins block observation and fire — nothing shoots through a wall it cannot see over. Stone
+            walls, boulders, wrecks and trench lines shelter whoever holds them, from the direction they face. Hits on
+            flanks and rear hurt far more than frontal ones. Suppressed units lose their nerve — accuracy, sight and
+            speed degrade until the fire lifts. Artillery scatters: observed targets are hammered, blind fire wastes
+            shells, and anything moving can slip the bracket. Attack aircraft strike in committed passes, then egress.
+          </p>
+        </div>
+        <div className="font-mono text-[9px] tracking-[0.24em] text-[#6b6557] mb-2 border-b border-[#ddd9cd] pb-1">
           THE INK LEDGER
         </div>
         <div className="grid grid-cols-2 gap-x-8 gap-y-[5px] mb-6">
@@ -332,9 +345,9 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
           ))}
         </div>
         <p className="text-[12px] leading-relaxed text-[#4c473d] mb-6">
-          Reconnaissance reveals the enemy; forests conceal stationary vehicles; ridgelines block observation — take
-          the high ground to see. Artillery reveals itself when it fires. Enemy air defence engages aircraft on
-          station — suppress or avoid it. Ammunition is finite: spend it like a professional.
+          Ammunition is finite — spend it like a professional. Order artillery directly onto an observed enemy for
+          corrected fire; order it onto empty ground and you will dig craters for nothing. Keep scouts forward: the
+          side that sees first, shoots first.
         </p>
         <button
           onClick={onClose}

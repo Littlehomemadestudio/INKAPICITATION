@@ -305,12 +305,165 @@ export class TerrainRenderer {
     this.drawRiver(ctx, cam);
     this.drawFord(ctx, cam);
     this.drawBridges(ctx, cam);
+    this.drawTrenches(ctx, cam);
     this.drawBuildings(ctx, cam.zoom, cam);
     this.drawRocks(ctx, cam);
+    this.drawWalls(ctx, cam);
+    this.drawBarriers(ctx, cam);
     this.drawTrees(ctx, cam);
     this.drawPowerLine(ctx, cam);
     this.drawLabels(ctx, cam);
     this.drawSpotHeights(ctx, cam);
+  }
+
+  /** dug positions — dark zigzag with a pale earth berm on the defender's side */
+  private drawTrenches(ctx: CanvasRenderingContext2D, cam: Camera) {
+    const t = this.terrain;
+    if (cam.zoom < 0.32) {
+      // strategic: a broken dark line — "there are dug positions here"
+      ctx.save();
+      ctx.strokeStyle = 'rgba(30,26,20,0.4)';
+      ctx.lineWidth = Math.max(2.2, 2.6 / cam.zoom);
+      ctx.setLineDash([7, 5]);
+      for (const tr of t.trenches) {
+        ctx.beginPath();
+        ctx.moveTo(tr.pts[0].x, tr.pts[0].y);
+        for (let i = 1; i < tr.pts.length; i++) ctx.lineTo(tr.pts[i].x, tr.pts[i].y);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+      return;
+    }
+    for (const tr of t.trenches) {
+      // berm — the spoil heap on the south side
+      ctx.save();
+      ctx.strokeStyle = 'rgba(196,190,174,0.9)';
+      ctx.lineWidth = 5.5;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'butt';
+      ctx.beginPath();
+      ctx.moveTo(tr.pts[0].x, tr.pts[0].y + 4.2);
+      for (let i = 1; i < tr.pts.length; i++) ctx.lineTo(tr.pts[i].x, tr.pts[i].y + 4.2);
+      ctx.stroke();
+      ctx.restore();
+      // the cut itself
+      ctx.save();
+      ctx.strokeStyle = 'rgba(28,24,18,0.88)';
+      ctx.lineWidth = 3.4;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(tr.pts[0].x, tr.pts[0].y);
+      for (let i = 1; i < tr.pts.length; i++) ctx.lineTo(tr.pts[i].x, tr.pts[i].y);
+      ctx.stroke();
+      // duckboards — short ticks inside the trench
+      if (cam.zoom > 0.9) {
+        ctx.strokeStyle = 'rgba(90,84,72,0.55)';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        for (let i = 0; i < tr.pts.length - 1; i++) {
+          const a = tr.pts[i];
+          const b = tr.pts[i + 1];
+          const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+          const dirA = Math.atan2(b.y - a.y, b.x - a.x);
+          const nx = Math.cos(dirA + Math.PI / 2);
+          const ny = Math.sin(dirA + Math.PI / 2);
+          for (let s = 2; s < segLen; s += 5.4) {
+            const x = a.x + (b.x - a.x) * (s / segLen);
+            const y = a.y + (b.y - a.y) * (s / segLen);
+            ctx.moveTo(x - nx * 1.2, y - ny * 1.2);
+            ctx.lineTo(x + nx * 1.2, y + ny * 1.2);
+          }
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  /** dry stone walls — cover you can read at a glance */
+  private drawWalls(ctx: CanvasRenderingContext2D, cam: Camera) {
+    const t = this.terrain;
+    const thick = Math.max(1.8, 2.2 / Math.sqrt(cam.zoom));
+    for (const w of t.walls) {
+      if (w.x + w.len < cam.viewX - 60 || w.x - w.len > cam.viewX + cam.viewW + 60) continue;
+      if (w.y + w.len < cam.viewY - 60 || w.y - w.len > cam.viewY + cam.viewH + 60) continue;
+      ctx.save();
+      ctx.translate(w.x, w.y);
+      ctx.rotate(w.rot);
+      // shadow
+      ctx.fillStyle = 'rgba(30,27,20,0.16)';
+      ctx.fillRect(-w.len / 2 + 2, -thick / 2 + 2.4, w.len, thick);
+      // stone body
+      ctx.fillStyle = '#a8a294';
+      ctx.fillRect(-w.len / 2, -thick / 2, w.len, thick);
+      // cap stones
+      ctx.fillStyle = '#c0baa9';
+      const n = Math.max(3, Math.round(w.len / 9));
+      for (let i = 0; i < n; i++) {
+        const x = -w.len / 2 + (i * w.len) / n + 1;
+        ctx.fillRect(x, -thick / 2 + 0.4, w.len / n - 2, thick * 0.4);
+      }
+      // copestones — the give-away profile of a field wall
+      if (cam.zoom > 0.7) {
+        ctx.fillStyle = '#8f897b';
+        for (let i = 0; i < n; i += 2) {
+          const x = -w.len / 2 + (i * w.len) / n + 1;
+          ctx.fillRect(x + 1, -thick / 2 - 0.9, w.len / n - 3, 1.1);
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  /** dragon's teeth — concrete anti-vehicle blocks */
+  private drawBarriers(ctx: CanvasRenderingContext2D, cam: Camera) {
+    const t = this.terrain;
+    if (cam.zoom < 0.5) {
+      // strategic: a dotted row of blocks
+      ctx.fillStyle = 'rgba(60,56,48,0.75)';
+      for (const b of t.barriers) {
+        ctx.fillRect(b.x - 2.6, b.y - 2.6, 5.2, 5.2);
+      }
+      return;
+    }
+    for (const b of t.barriers) {
+      if (b.x < cam.viewX - 30 || b.x > cam.viewX + cam.viewW + 30) continue;
+      if (b.y < cam.viewY - 30 || b.y > cam.viewY + cam.viewH + 30) continue;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      // ground shadow
+      ctx.fillStyle = 'rgba(30,27,20,0.2)';
+      ctx.beginPath();
+      ctx.ellipse(2.4, 2.8, 5.2, 4.2, b.rot, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.rotate(b.rot);
+      // pyramidal block seen from above: a square with an X brace
+      ctx.fillStyle = '#b5af9f';
+      ctx.strokeStyle = '#57523f';
+      ctx.lineWidth = Math.max(0.7, 0.8 / cam.zoom);
+      ctx.beginPath();
+      ctx.moveTo(-4, -3);
+      ctx.lineTo(4, -3);
+      ctx.lineTo(4, 3);
+      ctx.lineTo(-4, 3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-4, -3);
+      ctx.lineTo(4, 3);
+      ctx.moveTo(4, -3);
+      ctx.lineTo(-4, 3);
+      ctx.stroke();
+      // apex mark
+      ctx.fillStyle = '#8f897b';
+      ctx.beginPath();
+      ctx.arc(0, 0, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
   private drawFields(ctx: CanvasRenderingContext2D, cam: Camera) {
@@ -727,6 +880,49 @@ export class TerrainRenderer {
             ctx.fill();
           }
         }
+      } else if (b.kind === 'RUIN') {
+        // a broken structure — partial walls, rubble, no roof
+        ctx.save();
+        ctx.fillStyle = 'rgba(30,27,20,0.12)';
+        ctx.fillRect(-b.w / 2 + 3, -b.h / 2 + 3.6, b.w, b.h);
+        // scorched floor
+        ctx.fillStyle = 'rgba(150,144,130,0.5)';
+        ctx.fillRect(-b.w / 2, -b.h / 2, b.w, b.h);
+        // surviving wall fragments — jagged partial outline
+        ctx.strokeStyle = '#3f3a30';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.moveTo(-b.w / 2, -b.h / 2);
+        ctx.lineTo(b.w * 0.1, -b.h / 2);
+        ctx.moveTo(b.w * 0.3, -b.h / 2);
+        ctx.lineTo(b.w / 2, -b.h / 2);
+        ctx.lineTo(b.w / 2, -b.h * 0.05);
+        ctx.moveTo(b.w / 2, b.h * 0.18);
+        ctx.lineTo(b.w / 2, b.h / 2);
+        ctx.lineTo(b.w * 0.05, b.h / 2);
+        ctx.moveTo(-b.w * 0.2, b.h / 2);
+        ctx.lineTo(-b.w / 2, b.h / 2);
+        ctx.lineTo(-b.w / 2, -b.h / 2);
+        ctx.stroke();
+        // internal collapse
+        ctx.strokeStyle = 'rgba(96,90,76,0.7)';
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.moveTo(-b.w * 0.3, b.h * 0.1);
+        ctx.lineTo(b.w * 0.15, -b.h * 0.2);
+        ctx.moveTo(-b.w * 0.1, b.h * 0.3);
+        ctx.lineTo(b.w * 0.3, b.h * 0.12);
+        ctx.stroke();
+        // debris
+        ctx.fillStyle = 'rgba(70,64,52,0.7)';
+        for (let i = 0; i < 6; i++) {
+          const a = (i * 2.4) % (Math.PI * 2);
+          const rr = Math.max(b.w, b.h) * (0.22 + (i % 3) * 0.08);
+          ctx.beginPath();
+          ctx.arc(Math.cos(a) * rr, Math.sin(a) * rr * 0.7, 0.9 + (i % 3) * 0.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
       } else if (detail) {
         // roof hatching for houses / barns / sheds
         ctx.save();

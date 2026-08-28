@@ -60,12 +60,12 @@ export const ENEMY_BATTALIONS: BattalionDef[] = [
     '', [{ type: 'BTR82A', n: 1 }]),
 ];
 
-const BASE_INCOME: Record<Faction, number> = { FRIEND: 2.2, ENEMY: 2.6 };
+const BASE_INCOME: Record<Faction, number> = { FRIEND: 2.2, ENEMY: 2.0 };
 const FACTORY_INCOME = 5;
 const FACTORY_CAPTURE_RADIUS = 250;
 const FACTORY_CAPTURE_TIME = 7;
 const MAX_QUEUE = 3;
-const ENEMY_UNIT_CAP = 22;
+const ENEMY_UNIT_CAP = 16;
 
 interface ProductionItem {
   id: number;

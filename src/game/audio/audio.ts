@@ -17,7 +17,6 @@ export class AudioEngine {
   viewSpan = 2000;
   private active = 0;
   private lastByKind: Record<string, number> = {};
-  private engineNodes: Map<number, { oscA: OscillatorNode; oscB: OscillatorNode; gain: GainNode; filter: BiquadFilterNode }> = new Map();
 
   ensureStarted() {
     if (this.ctx) {
@@ -286,54 +285,132 @@ export class AudioEngine {
     osc.stop(t + 0.035);
   }
 
-  // ── aircraft engine loop ───────────────────────────────────
+  // ── aircraft engine — a physical turbofan that passes by ──
+
+  private engineNodes: Map<
+    number,
+    {
+      noise: AudioBufferSourceNode;
+      tone: OscillatorNode;
+      gain: GainNode;
+      pan: StereoPannerNode;
+      lp: BiquadFilterNode;
+      hp: BiquadFilterNode;
+      vol: number;
+      lastX: number;
+      lastY: number;
+      rate: number;
+    }
+  > = new Map();
 
   startEngine(id: number, x: number, y: number) {
     if (!this.ctx || !this.master || this.engineNodes.has(id)) return;
     const t = this.ctx.currentTime;
-    const oscA = this.ctx.createOscillator();
-    const oscB = this.ctx.createOscillator();
-    oscA.type = 'sawtooth';
-    oscB.type = 'sawtooth';
-    oscA.frequency.value = 68;
-    oscB.frequency.value = 68 * 1.007;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 420;
-    filter.Q.value = 0.8;
+
+    // filtered noise = the core of a distant jet: wind, buzz, no melody
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = this.noiseBuf;
+    noise.loop = true;
+    noise.playbackRate.value = 0.85;
+
+    // a faint low rotor tone buried in the noise
+    const tone = this.ctx.createOscillator();
+    tone.type = 'triangle';
+    tone.frequency.value = 54;
+
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 240;
+    lp.Q.value = 0.5;
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 90;
+
+    const toneGain = this.ctx.createGain();
+    toneGain.gain.value = 0.22;
     const gain = this.ctx.createGain();
-    gain.gain.value = 0;
+    gain.gain.value = 0; // fades in — the aircraft is first heard far away
     const pan = this.ctx.createStereoPanner();
-    oscA.connect(filter);
-    oscB.connect(filter);
-    filter.connect(gain);
+
+    noise.connect(hp);
+    tone.connect(toneGain);
+    toneGain.connect(hp);
+    hp.connect(lp);
+    lp.connect(gain);
     gain.connect(pan);
     pan.connect(this.master);
-    oscA.start(t);
-    oscB.start(t);
-    this.engineNodes.set(id, { oscA, oscB, gain, filter });
-    void x;
-    void y;
+    noise.start(t);
+    tone.start(t);
+    this.engineNodes.set(id, { noise, tone, gain, pan, lp, hp, vol: 0, lastX: x, lastY: y, rate: 1 });
   }
 
   updateEngine(id: number, x: number, y: number, active: boolean) {
     const n = this.engineNodes.get(id);
     if (!n || !this.ctx) return;
     const t = this.ctx.currentTime;
-    const att = this.attenFor(x, y, 3600);
-    const vol = active ? att * 0.24 : 0;
-    n.gain.gain.setTargetAtTime(vol, t, 0.18);
-    const pan = clamp((x - this.listenerX) / (this.viewSpan * 0.75), -1, 1) * 0.7;
-    n.filter.frequency.setTargetAtTime(360 + att * 260, t, 0.2);
-    void pan;
+
+    // distance to the listener — with a little smoothing on position
+    const dx = x - n.lastX;
+    const dy = y - n.lastY;
+    n.lastX = x;
+    n.lastY = y;
+    const d = Math.hypot(x - this.listenerX, y - this.listenerY);
+
+    // loudness: quiet at the horizon, honest in close — never screaming
+    const closeness = clamp(1 - d / 2600, 0, 1) ** 1.6;
+    const targetVol = active ? closeness * 0.16 : 0;
+    // slow envelope: a jet swells and fades, it does not flicker
+    n.gain.gain.setTargetAtTime(targetVol, t, active ? 0.55 : 0.3);
+
+    // closing speed along the listener axis → gentle doppler + brightness
+    const toListenerX = this.listenerX - x;
+    const toListenerY = this.listenerY - y;
+    const tl = Math.hypot(toListenerX, toListenerY) || 1;
+    const closing = (dx * toListenerX + dy * toListenerY) / tl; // m per update
+    const approach = clamp(closing / 26, -1, 1);
+    const rate = 1 + approach * 0.12;
+    n.rate = n.rate * 0.9 + rate * 0.1;
+    n.noise.playbackRate.setTargetAtTime(0.85 * n.rate, t, 0.4);
+    n.tone.frequency.setTargetAtTime(54 * n.rate, t, 0.4);
+
+    // nearer = brighter, but always band-limited — restraint is the rule
+    n.lp.frequency.setTargetAtTime(200 + closeness * 620, t, 0.5);
+    const panV = clamp((x - this.listenerX) / (this.viewSpan * 0.7), -1, 1) * 0.75;
+    n.pan.pan.setTargetAtTime(panV, t, 0.35);
+  }
+
+  /** the fly-by swell as an aircraft crosses the camera — felt, not announced */
+  jetPassby(x: number, y: number) {
+    if (!this.ctx || !this.noiseBuf) return;
+    if (!this.throttle('jetpass', 1.2)) return;
+    const dest = this.makeDest(x, y, 2200, 0.2);
+    if (!dest) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.8;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(160, t);
+    filter.frequency.linearRampToValueAtTime(480, t + 0.9);
+    filter.frequency.linearRampToValueAtTime(130, t + 2.2);
+    filter.Q.value = 0.7;
+    const g = dest.node;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(dest.vol, t + 0.7);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 2.3);
+    src.connect(filter);
+    filter.connect(g);
+    src.start(t);
+    src.stop(t + 2.4);
   }
 
   stopEngine(id: number) {
     const n = this.engineNodes.get(id);
     if (!n) return;
     try {
-      n.oscA.stop();
-      n.oscB.stop();
+      n.noise.stop();
+      n.tone.stop();
     } catch {
       /* already stopped */
     }
