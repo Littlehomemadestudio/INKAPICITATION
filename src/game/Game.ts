@@ -58,6 +58,8 @@ export class Game {
   killsByType = new Map<string, number>();
   lossesByType = new Map<string, number>();
   private processedDead = new Set<number>();
+  /** the ARSENAL command console — toggled with [R] */
+  arsenalOpen = false;
 
   private simCtxCache: SimContext;
   private raf = 0;
@@ -72,9 +74,9 @@ export class Game {
     this.ctx = canvas.getContext('2d', { alpha: false })!;
     this.seed = seed ?? Math.floor(Math.random() * 1e9);
 
-    this.camera = new Camera(4096, 3072);
     this.audio = new AudioEngine();
     this.terrain = new Terrain(this.seed);
+    this.camera = new Camera(this.terrain.W, this.terrain.H);
     this.terrainRenderer = new TerrainRenderer(this.terrain);
     this.effects = new EffectsSystem(this.seed, this.camera, this.audio, this.terrain.W, this.terrain.H);
     this.projectiles = new ProjectileSystem();
@@ -100,7 +102,7 @@ export class Game {
     };
 
     this.resize();
-    this.camera.focusOn(980, 2260, 0.46);
+    this.camera.focusOn(1700, 4700, 0.42);
     this.loop = this.loop.bind(this);
     this.raf = requestAnimationFrame(this.loop);
   }
@@ -111,10 +113,10 @@ export class Game {
     this.objectives = data.objectives;
     this.anchors = data.anchors;
     this.economy = new InkEconomy(data.sectors, data.startInk);
-    this.economy.friendlyEntry = { x: 240, y: 2960 };
-    this.economy.friendlyAssembly = { x: 640, y: 2520 };
-    this.economy.enemyEntry = { x: 3440, y: 60 };
-    this.economy.enemyRally = { x: 3480, y: 560 };
+    this.economy.friendlyEntry = { x: 1300, y: 5560 };
+    this.economy.friendlyAssembly = { x: 1950, y: 4550 };
+    this.economy.enemyEntry = { x: 7600, y: 150 };
+    this.economy.enemyRally = { x: 7050, y: 900 };
     this.ai = new EnemyCommander(this.anchors);
     this.ai.init(this.simCtxSafe());
     this.time = 0;
@@ -158,9 +160,10 @@ export class Game {
     this.running = true;
     this.audio.ensureStarted();
     this.log(`OPERATION CROSSWIND — TASK FORCE SABRE DEPLOYED`, 'objective');
-    this.log(`BASE INK 260 · SECTORS AND WORKS PAY — READ THE DEPLOY PANEL`, 'economy');
-    this.log(`ZAVOD 3 LIES ABANDONED SOUTH OF THE RIVER — OCCUPY IT`, 'info');
-    this.log(`VELIKIY BAY PAYS INK — HULLS ARRIVE FROM THE APPROACHES, SE`, 'info');
+    this.log(`BASE INK 280 · SECTORS AND WORKS PAY — READ THE DEPLOY PANEL`, 'economy');
+    this.log(`ZAVOD WEST LIES ABANDONED ON THE WEST ROAD — OCCUPY IT EARLY`, 'info');
+    this.log(`AZURE BAY PAYS INK — HULLS ARRIVE FROM THE SOUTHERN APPROACHES`, 'info');
+    this.log(`THE THEATRE IS WIDE — USE THE MINIMAP AND THE SPEED CONTROLS`, 'info');
   }
 
   restart(newSeed?: number) {
@@ -189,7 +192,7 @@ export class Game {
     this.running = true;
     this.paused = false;
     this.speed = 1;
-    this.camera.focusOn(980, 2260, 0.46);
+    this.camera.focusOn(1700, 4700, 0.42);
     this.log(`NEW SHEET — OPERATION CROSSWIND RESTARTED`, 'objective');
   }
 
@@ -227,7 +230,7 @@ export class Game {
     this.camera.setViewport(rect.width, rect.height);
   }
 
-  /** player queues a battalion from the HUD */
+  /** player queues a unit from the arsenal / deploy panel */
   queueBattalion(battalionId: string): boolean {
     if (this.result) return false;
     const def = FRIEND_BATTALIONS.find((b) => b.id === battalionId);
@@ -247,6 +250,11 @@ export class Game {
       this.audio.uiTick();
     }
     return !!ok;
+  }
+
+  toggleArsenal(force?: boolean) {
+    this.arsenalOpen = force ?? !this.arsenalOpen;
+    this.audio.uiTick();
   }
 
   // ── main loop ──────────────────────────────────────────────
@@ -585,9 +593,15 @@ export class Game {
                   : detailUnit.def.projectile === 'AUTO'
                     ? detailUnit.def.type === 'PATROL'
                       ? '25 mm + 2× TORPEDO'
-                      : '25 mm AUTOCANNON'
+                      : detailUnit.def.type === 'VULCAN'
+                        ? '20 mm ROTARY'
+                        : detailUnit.def.type === 'RIFLE'
+                          ? '5.56 mm RIFLES'
+                          : '25 mm AUTOCANNON'
                     : detailUnit.def.projectile === 'MISSILE_AIR'
-                      ? 'AGM-114 × 6'
+                      ? detailUnit.def.type === 'F16C'
+                        ? 'AIM-120 AAM ×4'
+                        : 'AGM-114 × 6'
                       : detailUnit.def.type === 'BATTLESHIP'
                         ? '9× 380 mm MAIN BATTERY'
                         : detailUnit.def.type === 'CRUISER'
@@ -596,7 +610,15 @@ export class Game {
                             ? '130 mm + 8 SSM'
                             : detailUnit.def.type === 'FRIGATE'
                               ? '76 mm + SAM'
-                              : 'SAM',
+                              : detailUnit.def.type === 'PATRIOT'
+                                ? 'PAC-3 INTERCEPTORS ×4'
+                                : detailUnit.def.type === 'NASAMS'
+                                  ? 'AIM-120 AMRAAM ×6'
+                                  : detailUnit.def.type === 'LINEBACKER'
+                                    ? 'FIM-92 STINGER ×8'
+                                    : detailUnit.def.type === 'BUK'
+                                      ? '9M38 MISSILES ×6'
+                                      : 'SAM',
             range: detailUnit.def.range,
             speedKph: Math.round(detailUnit.def.speed * 3.6),
             vision: detailUnit.def.vision,
@@ -661,6 +683,7 @@ export class Game {
         ...b,
         available: this.economy.ink.FRIEND >= b.cost && this.economy.canQueue('FRIEND') && !this.result,
       })),
+      arsenalOpen: this.arsenalOpen,
       production: this.economy.productions
         .filter((p) => p.faction === 'FRIEND')
         .map((p) => ({

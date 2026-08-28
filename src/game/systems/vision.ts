@@ -86,8 +86,8 @@ export class VisionSystem {
     // exploration grid
     for (const f of units) {
       if (f.dead || f.faction !== 'FRIEND') continue;
-      const cx = Math.floor(f.x / (4096 / this.cols));
-      const cy = Math.floor(f.y / (3072 / this.rows));
+      const cx = Math.floor(f.x / (ctx.terrain.W / this.cols));
+      const cy = Math.floor(f.y / (ctx.terrain.H / this.rows));
       const rad = f.isAir ? 3 : 2;
       for (let dy = -rad; dy <= rad; dy++) {
         for (let dx = -rad; dx <= rad; dx++) {
@@ -122,6 +122,10 @@ export class VisionSystem {
   private spotRange(observer: Unit, target: Unit, ctx: SimContext, obH: number): number {
     let r = observer.def.vision;
     if (target.isAir) {
+      // an air-defence radar reaches much further than the eyeball —
+      // detection at range is the whole point of a fire-control radar
+      const aaRadar = observer.def.aa?.radar;
+      if (aaRadar) r = Math.max(r, aaRadar);
       return r * 1.15 + 250;
     }
     // high ground sees further — up to ±30% by relative elevation
@@ -166,6 +170,8 @@ function labelFor(u: Unit): string {
       return 'ARTY';
     case 'REC':
       return 'RECCE';
+    case 'INF':
+      return 'INFANTRY';
     case 'SPAA':
       return 'AIR DEFENSE';
     case 'HQ':

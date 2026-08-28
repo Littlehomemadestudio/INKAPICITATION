@@ -10,6 +10,7 @@ import type { BattalionDef, Faction, Sector } from '../core/types';
 import type { SimContext } from '../entities/units';
 import { Unit } from '../entities/units';
 import type { UnitType } from '../entities/unitDefs';
+import { FRIEND_ROSTER, RosterEntry } from '../entities/roster';
 import { dist } from '../core/math';
 
 // ── purchasable formations ────────────────────────────────────
@@ -28,40 +29,9 @@ function b(
 ): BattalionDef {
   return { id, name, composition: comp, kinds, cost, buildTime, desc, units, air, naval };
 }
-/** what the player can raise at the staging area */
-export const FRIEND_BATTALIONS: BattalionDef[] = [
-  b('RECON', 'RECON ELEMENT', '2× REC', ['REC', 'REC'], 80, 22,
-    'Fast scouts. Wide eyes, thin skin — they find the ground others will take.',
-    [{ type: 'M1127', n: 2 }]),
-  b('ARTY', 'ARTILLERY DETACHMENT', '2× SPG', ['SPG', 'SPG'], 150, 32,
-    'Two Paladins and a radio. They soften everything before you commit.',
-    [{ type: 'M109A7', n: 2 }]),
-  b('MECH', 'MECHANIZED COMPANY', '2× MBT + 2× IFV', ['MBT', 'MBT', 'IFV', 'IFV'], 230, 38,
-    'The balanced fist. Tanks and Bradleys that clear towns and tree lines.',
-    [{ type: 'M1A2', n: 2 }, { type: 'M2A3', n: 2 }]),
-  b('ARMOR', 'ARMOURED COMPANY', '3× MBT + 1× REC', ['MBT', 'MBT', 'MBT', 'REC'], 280, 45,
-    'Steel weight for the decisive axis. Nothing else breaks a prepared line faster.',
-    [{ type: 'M1A2', n: 3 }, { type: 'M1127', n: 1 }]),
-  b('AIR', 'AIR SORTIE', '1× CAS', ['AIR'], 130, 28,
-    'One A-10 on station. Minds the air defence — it bites back.',
-    [{ type: 'A10C', n: 1 }], true),
-  // ── the fleet — the same ink, a different war ──
-  b('PT', 'PATROL DIVISION', '2× PT', ['SEA', 'SEA'], 90, 30,
-    'Two fast attack craft. Torpedoes for hulls too big to duel — cheap, brave, expendable.',
-    [{ type: 'PATROL', n: 2 }], false, true),
-  b('FF', 'FRIGATE SECTION', '1× FF', ['SEA'], 220, 45,
-    'An escort with a 76 mm gun and surface-to-air cells. The fleet’s umbrella begins here.',
-    [{ type: 'FRIGATE', n: 1 }], false, true),
-  b('DD', 'DESTROYER DIVISION', '1× DD', ['SEA'], 380, 60,
-    'A guided-missile destroyer. 130 mm gunfire at range, eight ship-killers in the cells.',
-    [{ type: 'DESTROYER', n: 1 }], false, true),
-  b('CG', 'CRUISER SQUADRON', '1× CG', ['SEA'], 650, 80,
-    'A large combatant. Twin 152 mm turrets, a deep magazine — presence itself.',
-    [{ type: 'CRUISER', n: 1 }], false, true),
-  b('BB', 'CAPITAL SHIP — VELIKIY', '1× BB', ['SEA'], 1500, 120,
-    'THE BIG BOI. Nine 380 mm rifles, sixteen missiles, a hull that anchors a theatre. Save for her.',
-    [{ type: 'BATTLESHIP', n: 1 }], false, true),
-];
+
+/** the player's arsenal — one unit per purchase (see roster.ts) */
+export const FRIEND_BATTALIONS: RosterEntry[] = FRIEND_ROSTER;
 
 /** what the enemy raises at his HQ */
 export const ENEMY_BATTALIONS: BattalionDef[] = [
@@ -71,6 +41,8 @@ export const ENEMY_BATTALIONS: BattalionDef[] = [
     '', [{ type: 'T90M', n: 1 }, { type: 'BMP3', n: 2 }]),
   b('E_AD', 'AD SECTION', '1× SAM', ['AD'], 110, 26,
     '', [{ type: 'PANTSIR', n: 1 }]),
+  b('E_MSAM', 'SAM BATTERY', '1× M-SAM', ['AD'], 190, 55,
+    '', [{ type: 'BUK', n: 1 }]),
   b('E_GUN', 'GUN SECTION', '1× SPG', ['SPG'], 120, 28,
     '', [{ type: '2S19', n: 1 }]),
   b('E_REC', 'RECON PROBE', '1× REC', ['REC'], 60, 18,
@@ -85,8 +57,9 @@ const BASE_INCOME: Record<Faction, number> = { FRIEND: 2.2, ENEMY: 2.0 };
 const FACTORY_INCOME = 5;
 const FACTORY_CAPTURE_RADIUS = 250;
 const FACTORY_CAPTURE_TIME = 7;
-const MAX_QUEUE = 3;
-const ENEMY_UNIT_CAP = 16;
+/** the player plans in single units and may queue a deep build order */
+const MAX_QUEUE: Record<Faction, number> = { FRIEND: 6, ENEMY: 3 };
+export const ENEMY_UNIT_CAP = 46;
 
 interface ProductionItem {
   id: number;
@@ -103,11 +76,11 @@ export class InkEconomy {
   private nextProdId = 1;
 
   /** where friendly reinforcements march in from */
-  friendlyEntry = { x: 240, y: 2960 };
-  friendlyAssembly = { x: 640, y: 2520 };
+  friendlyEntry = { x: 1300, y: 5560 };
+  friendlyAssembly = { x: 1950, y: 4550 };
   /** where enemy reinforcements arrive */
-  enemyEntry = { x: 3440, y: 60 };
-  enemyRally = { x: 3480, y: 560 };
+  enemyEntry = { x: 7600, y: 150 };
+  enemyRally = { x: 7050, y: 900 };
 
   stats = { inkEarned: 0, inkSpent: 0, battalionsDeployed: 0, factoriesHeld: 0 };
   private counters = new Map<string, number>();
@@ -255,7 +228,7 @@ export class InkEconomy {
   // ── production ─────────────────────────────────────────────
 
   canQueue(faction: Faction): boolean {
-    return this.productions.filter((p) => p.faction === faction).length < MAX_QUEUE;
+    return this.productions.filter((p) => p.faction === faction).length < MAX_QUEUE[faction];
   }
 
   purchase(faction: Faction, battalionId: string): BattalionDef | null {
@@ -328,6 +301,10 @@ export class InkEconomy {
           idx++;
         }
       }
+      // aircraft deliver to the flight line, not the march column
+      if (battalion.air) {
+        ctx.log(`${battalion.name} ON THE FLIGHT LINE — LAUNCH VIA AIR OPERATIONS`, 'info');
+      }
     } else {
       // enemy reinforcements — capped so the sheet stays readable
       const enemyCombat = ctx.units.filter(
@@ -342,7 +319,7 @@ export class InkEconomy {
         return;
       }
       if (battalion.naval) {
-        // enemy hulls sortie from PORT VELIKY
+        // enemy hulls sortie from PORT AZURE
         ctx.log(`ENEMY HULL SORTIE — ${battalion.name}`, 'contact');
         const sea = ctx.terrain.sea;
         const harbour = sea.harbour;
@@ -365,7 +342,7 @@ export class InkEconomy {
           for (let i = 0; i < spec.n; i++) {
             const u = this.spawnUnit(spec.type, 'ENEMY', this.enemyEntry, ctx);
             // straight onto station over the bay
-            u.launchAir({ x: 3500, y: 2500 });
+            u.launchAir({ x: 5000, y: 3200 });
           }
         }
         return;
@@ -375,6 +352,15 @@ export class InkEconomy {
       for (const spec of battalion.units) {
         for (let i = 0; i < spec.n; i++) {
           const u = this.spawnUnit(spec.type, 'ENEMY', this.enemyEntry, ctx);
+          // heavy SAM batteries emplace covering the HQ approaches —
+          // they do not join the rally, they ARE the position
+          if (spec.type === 'BUK') {
+            const berth = { x: 6900 + this.rngRange(0, 160), y: 420 + this.rngRange(0, 140) };
+            u.orderMove(berth, ctx);
+            u.defendPos = berth;
+            ctx.log(`ENEMY SAM BATTERY EMPLACING NORTH — AIRCRAFT WARNED`, 'alert');
+            continue;
+          }
           const a = (idx / Math.max(1, battalion.units.length)) * Math.PI * 2;
           const rally = {
             x: this.enemyRally.x + Math.cos(a) * 140,
@@ -400,15 +386,20 @@ export class InkEconomy {
   private nextCallsign(type: string, faction: Faction): string {
     const prefix =
       faction === 'FRIEND'
-        ? type === 'M1A2' ? 'SABRE' : type === 'M2A3' ? 'RAIDER' : type === 'M109A7' ? 'HAMMER' : type === 'M1127' ? 'SCOUT' : type === 'A10C' ? 'TALON'
+        ? type === 'M1A2' ? 'SABRE' : type === 'M2A3' ? 'RAIDER' : type === 'M109A7' ? 'HAMMER' : type === 'M1127' ? 'SCOUT' : type === 'RIFLE' ? 'RIFLE'
+          : type === 'VULCAN' ? 'IRON' : type === 'LINEBACKER' ? 'GUARD' : type === 'NASAMS' ? 'SHIELD' : type === 'PATRIOT' ? 'SENTRY' : type === 'F16C' ? 'VIPER' : type === 'A10C' ? 'TALON'
           : type === 'PATROL' ? 'SPEAR' : type === 'FRIGATE' ? 'AXE' : type === 'DESTROYER' ? 'LANCE' : type === 'CRUISER' ? 'CROWN' : 'VELIKIY'
         : type === 'T90M' ? 'TK' : type === 'BMP3' ? 'MEC' : type === 'BTR82A' ? 'REC' : type === '2S19' ? 'GUN' : type === 'SU25K' ? 'CLAW'
-          : type === 'PATROL' ? 'KPT' : 'AD';
-    // continue the initial task force's numbering
-    const starts: Record<string, number> = { SABRE: 3, RAIDER: 2, HAMMER: 2, SCOUT: 2, TALON: 1 };
+          : type === 'PATROL' ? 'KPT' : type === 'BUK' ? 'DOME' : 'AD';
+    // continue the initial task force's numbering; new systems start at 1
+    const starts: Record<string, number> = { SABRE: 3, RAIDER: 2, HAMMER: 2, SCOUT: 2, TALON: 1, RIFLE: 0, IRON: 0, GUARD: 0, SHIELD: 0, SENTRY: 0, VIPER: 0 };
     const n = (this.counters.get(prefix) ?? starts[prefix] ?? 3) + 1;
     this.counters.set(prefix, n);
     return `${prefix} ${n}`;
+  }
+
+  private rngRange(a: number, b: number): number {
+    return a + Math.random() * (b - a);
   }
 
   // ── combat rewards ─────────────────────────────────────────
@@ -439,6 +430,7 @@ export class InkEconomy {
     const enemies = ctx.units.filter((u) => u.faction === 'ENEMY' && !u.dead);
     const arty = enemies.filter((u) => u.def.kind === 'SPG').length;
     const ad = enemies.filter((u) => u.def.kind === 'SPAA').length;
+    const msam = enemies.filter((u) => u.def.type === 'BUK').length;
     const rec = enemies.filter((u) => u.def.kind === 'REC').length;
     const pts = enemies.filter((u) => u.isShip).length;
     const cas = enemies.filter((u) => u.isAir && u.airState !== 'STANDBY' && u.airState !== 'DOWN').length;
@@ -452,16 +444,24 @@ export class InkEconomy {
     // is a war and he fights it: air to hunt them, hulls to screen
     const friendlyHulls = ctx.units.filter((u) => u.faction === 'FRIEND' && u.isShip && !u.dead);
     const fleetSpotted = friendlyHulls.length > 0;
+    // is the player flying? then the sky needs defending — a medium
+    // SAM battery is the counter to an air habit
+    const friendlyAirActive = ctx.units.some(
+      (u) => u.faction === 'FRIEND' && u.isAir && !u.dead && (u.airState === 'PATROL' || u.airState === 'INBOUND')
+    );
     // count what is already on the ways — no buying past the cap
     const queued = this.productions.filter((p) => p.faction === 'ENEMY');
     const queuedAir = queued.filter((p) => p.battalion.air).length;
     const queuedNaval = queued.filter((p) => p.battalion.naval).length;
+    const queuedMSAM = queued.filter((p) => p.battalion.id === 'E_MSAM').length;
 
     let want: string | null = null;
     if (fleetSpotted && cas + queuedAir < 2 && this.ink.ENEMY >= 150 && Math.random() < 0.65) {
       want = 'E_AIR'; // the Frogfoot goes after the fleet
     } else if (fleetSpotted && pts + queuedNaval < 3 && this.ink.ENEMY >= 70 && Math.random() < 0.5) {
       want = 'E_PT';
+    } else if (friendlyAirActive && msam + queuedMSAM < 1 && this.ink.ENEMY >= 190) {
+      want = 'E_MSAM'; // air power answered with area denial
     } else if (rec < 1 && this.ink.ENEMY >= 60) {
       want = 'E_REC';
     } else if (arty < 2 && this.ink.ENEMY >= 120) {

@@ -44,6 +44,8 @@ export interface Projectile {
   /** torpedo: minimum run before the pistol arms */
   armDist?: number;
   runDist?: number;
+  /** probability the target defeats this missile — set by the shooter */
+  evade?: number;
 }
 
 export interface ProjectileContext {
@@ -189,8 +191,8 @@ export class ProjectileSystem {
     });
   }
 
-  /** air-launched guided missile */
-  fireAGM(ctx: ProjectileContext, owner: Unit, target: Unit, damage: number, splash: number) {
+  /** air-launched guided missile (AGM vs ground, AAM vs aircraft) */
+  fireAGM(ctx: ProjectileContext, owner: Unit, target: Unit, damage: number, splash: number, evade?: number) {
     const a = angleOf(target.x - owner.x, target.y - owner.y);
     this.spawn({
       kind: 'MISSILE_AIR',
@@ -205,20 +207,21 @@ export class ProjectileSystem {
       splash,
       ownerId: owner.id,
       targetId: target.id,
+      evade,
       ttl: 7,
     });
     ctx.audio.missileLaunch(owner.x, owner.y);
   }
 
-  /** SAM against aircraft */
-  fireSAM(ctx: ProjectileContext, owner: Unit, target: Unit, damage: number) {
+  /** SAM against aircraft — `evade` is the target's defeat chance */
+  fireSAM(ctx: ProjectileContext, owner: Unit, target: Unit, damage: number, opts?: { evade?: number; z?: number }) {
     const a = angleOf(target.x - owner.x, target.y - owner.y);
     this.spawn({
       kind: 'MISSILE_SPAA',
       friend: owner.faction === 'FRIEND',
       x: owner.x + Math.cos(a) * 4,
       y: owner.y + Math.sin(a) * 4,
-      z: 3,
+      z: opts?.z ?? 3,
       angle: a,
       vx: Math.cos(a) * 150,
       vy: Math.sin(a) * 150,
@@ -227,6 +230,7 @@ export class ProjectileSystem {
       splash: 0,
       ownerId: owner.id,
       targetId: target.id,
+      evade: opts?.evade,
       ttl: 9,
     });
     ctx.audio.missileLaunch(owner.x, owner.y);
@@ -322,7 +326,8 @@ export class ProjectileSystem {
     owner: Unit,
     launcher: { x: number; y: number },
     target: Unit,
-    def: { damage: number }
+    def: { damage: number },
+    evade?: number
   ) {
     const a = angleOf(target.x - launcher.x, target.y - launcher.y);
     this.spawn({
@@ -339,6 +344,7 @@ export class ProjectileSystem {
       splash: 0,
       ownerId: owner.id,
       targetId: target.id,
+      evade,
       ttl: 10,
     });
     ctx.audio.missileLaunch(launcher.x, launcher.y);
@@ -525,14 +531,16 @@ export class ProjectileSystem {
               break;
             }
           }
-          if (p.kind === 'MISSILE_SPAA') {
-            p.z += p.vz * dt;
-            p.vz -= 30 * dt;
+          if (p.kind === 'MISSILE_SPAA' || (p.kind === 'MISSILE_AIR' && target.isAir)) {
+            if (p.kind === 'MISSILE_SPAA') {
+              p.z += p.vz * dt;
+              p.vz -= 30 * dt;
+            }
             // proximity to aircraft → evasion roll
             const d = dist(p.x, p.y, target.x, target.y);
             if (d < 230 && !p.defeated) {
               p.defeated = true;
-              if (this.rng.next() < 0.34) {
+              if (this.rng.next() < (p.evade ?? 0.34)) {
                 // flares defeat the missile
                 target.onEvaded?.();
                 p.targetId = -1;

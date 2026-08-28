@@ -10,6 +10,7 @@ import { Game } from '@/game/Game';
 import type { AfterActionReport, HudSnapshot } from '@/game/core/types';
 import { TopBar, BottomBar, CommsFeed, CursorModeChip } from './hud/HudBars';
 import { BriefingOverlay, EndOverlay, HelpOverlay } from './hud/Overlays';
+import { Arsenal } from './hud/Arsenal';
 
 export default function GameShell() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -22,31 +23,42 @@ export default function GameShell() {
   const [aarDismissed, setAarDismissed] = useState(false);
   const [seed, setSeed] = useState(0);
   const [aar, setAar] = useState<AfterActionReport | null>(null);
+  /** the theatre generates for a few seconds — say so, don't freeze */
+  const [booting, setBooting] = useState(true);
 
   useEffect(() => {
     if (!canvasRef.current) return;
-    const game = new Game(canvasRef.current, (s) => setHud(s));
-    gameRef.current = game;
-    setSeed(game.seed);
-    if (typeof window !== 'undefined') {
-      (window as unknown as { __paperStorm?: Game }).__paperStorm = game;
-    }
-
-    const ro = new ResizeObserver(() => game.resize());
-    ro.observe(canvasRef.current);
-
-    const mmTimer = window.setInterval(() => {
-      const mm = minimapRef.current;
-      if (mm && gameRef.current) {
-        const ctx = mm.getContext('2d');
-        if (ctx) gameRef.current.renderer.drawMinimap(ctx, mm.width, mm.height, gameRef.current);
+    let game: Game | null = null;
+    let ro: ResizeObserver | null = null;
+    let mmTimer = 0;
+    // let the boot screen paint before the world builds
+    const boot = window.setTimeout(() => {
+      if (!canvasRef.current) return;
+      game = new Game(canvasRef.current, (s) => setHud(s));
+      gameRef.current = game;
+      setSeed(game.seed);
+      setBooting(false);
+      if (typeof window !== 'undefined') {
+        (window as unknown as { __paperStorm?: Game }).__paperStorm = game;
       }
-    }, 160);
+
+      ro = new ResizeObserver(() => game?.resize());
+      ro.observe(canvasRef.current);
+
+      mmTimer = window.setInterval(() => {
+        const mm = minimapRef.current;
+        if (mm && gameRef.current) {
+          const ctx = mm.getContext('2d');
+          if (ctx) gameRef.current.renderer.drawMinimap(ctx, mm.width, mm.height, gameRef.current);
+        }
+      }, 160);
+    }, 40);
 
     return () => {
-      window.clearInterval(mmTimer);
-      ro.disconnect();
-      game.dispose();
+      window.clearTimeout(boot);
+      if (mmTimer) window.clearInterval(mmTimer);
+      ro?.disconnect();
+      game?.dispose();
       gameRef.current = null;
     };
   }, []);
@@ -110,6 +122,18 @@ export default function GameShell() {
         style={{ cursor: 'crosshair' }}
       />
 
+      {/* the surveyors are still drawing the sheet */}
+      {booting && (
+        <div className="absolute inset-0 bg-[#161513] flex flex-col items-center justify-center gap-3">
+          <div className="font-mono text-[11px] tracking-[0.45em] text-[#f3f1ea] ps-blink">
+            PLOTTING THE THEATRE
+          </div>
+          <div className="font-mono text-[9px] tracking-[0.25em] text-[#5d584d]">
+            SHEET 3368-IV · AZURE COAST · 8 × 6 KM
+          </div>
+        </div>
+      )}
+
       {/* frame lines */}
       <div className="pointer-events-none absolute inset-x-0 top-10 h-px bg-[#36322a]" />
       <div className="pointer-events-none absolute inset-x-0 h-px bg-[#36322a]" style={{ bottom: 'var(--ps-h-bottom)' }} />
@@ -128,6 +152,11 @@ export default function GameShell() {
       {/* comms traffic rides the battlefield itself */}
       <CommsFeed hud={hud} />
       <CursorModeChip hud={hud} />
+
+      {/* the arsenal — the player's order of battle [R] */}
+      {!briefingOpen && !hud?.result && hud?.arsenalOpen && (
+        <Arsenal hud={hud} gameRef={gameRef} />
+      )}
 
       {/* paused veil */}
       {hud?.paused && !result && !briefingOpen && (

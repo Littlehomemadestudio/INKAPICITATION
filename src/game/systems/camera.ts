@@ -41,7 +41,8 @@ export class Camera {
   setViewport(w: number, h: number) {
     this.viewW = w;
     this.viewH = h;
-    this.minZoom = Math.max(w / (this.worldW * 2.9), h / (this.worldH * 2.9), 0.1);
+    // the whole theatre must fit on one screen when zoomed fully out
+    this.minZoom = Math.max(w / (this.worldW * 2.6), h / (this.worldH * 2.6), 0.05);
     this.maxZoom = 9.0;
     this.clampNow();
   }

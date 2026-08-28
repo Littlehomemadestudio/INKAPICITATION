@@ -52,8 +52,8 @@ export class TerrainRenderer {
         const x = px * invS;
         const y = py * invS;
         const e = 12;
-        const hx = t.heightAt(x + e, y) - t.heightAt(x - e, y);
-        const hy = t.heightAt(x, y + e) - t.heightAt(x, y - e);
+        const hx = t.heightAt8(x + e, y) - t.heightAt8(x - e, y);
+        const hy = t.heightAt8(x, y + e) - t.heightAt8(x, y - e);
         // light from NW (-1,-1) normalised
         const nl = (-hx - hy) / (Math.hypot(hx, hy) * Math.SQRT2 + 1e-6);
         const slope = Math.hypot(hx, hy) / (2 * e);
@@ -61,7 +61,7 @@ export class TerrainRenderer {
         // cliff faces read darker — steep ground has exposed rock
         if (slope > 0.34) shade -= (slope - 0.34) * 0.55;
         // elevation: valleys slightly darker, high ground lighter
-        const elev = t.heightAt(x, y);
+        const elev = t.heightAt8(x, y);
         shade += (elev - 30) * 0.0022;
         // river valley mist
         const dr = t.distToPolyline(x, y, t.river);
@@ -268,24 +268,38 @@ export class TerrainRenderer {
     ctx.drawImage(this.wash, 0, 0, t.W, t.H);
     ctx.drawImage(this.stains, 0, 0, t.W, t.H);
 
-    // contour lines
-    if (t.contours) {
+    // contour lines — tiled, only the visible kilometres are stroked;
+    // at theatre zoom the minor interval drops out and only the bold
+    // index contours remain, exactly like a real map sheet
+    {
+      const pad = 80;
+      const vx0 = cam.viewX - pad;
+      const vx1 = cam.viewX + cam.viewW + pad;
+      const vy0 = cam.viewY - pad;
+      const vy1 = cam.viewY + cam.viewH + pad;
+      const showMinor = cam.zoom >= 0.16;
       const wMin = Math.max(1.1, 0.9 / cam.zoom);
       const wMaj = Math.max(2.2, 1.6 / cam.zoom);
-      ctx.save();
-      ctx.globalAlpha = 0.62;
-      ctx.strokeStyle = '#a29d90';
-      ctx.lineWidth = wMin;
-      ctx.lineJoin = 'round';
-      ctx.stroke(t.contours.minor);
-      ctx.restore();
-      ctx.save();
-      ctx.globalAlpha = 0.78;
-      ctx.strokeStyle = '#847f71';
-      ctx.lineWidth = wMaj;
-      ctx.lineJoin = 'round';
-      ctx.stroke(t.contours.major);
-      ctx.restore();
+      for (const tile of t.contourTiles) {
+        if (tile.x0 > vx1 || tile.x0 + tile.size < vx0) continue;
+        if (tile.y0 > vy1 || tile.y0 + tile.size < vy0) continue;
+        if (showMinor) {
+          ctx.save();
+          ctx.globalAlpha = 0.62;
+          ctx.strokeStyle = '#a29d90';
+          ctx.lineWidth = wMin;
+          ctx.lineJoin = 'round';
+          ctx.stroke(tile.minor);
+          ctx.restore();
+        }
+        ctx.save();
+        ctx.globalAlpha = 0.78;
+        ctx.strokeStyle = '#847f71';
+        ctx.lineWidth = wMaj;
+        ctx.lineJoin = 'round';
+        ctx.stroke(tile.major);
+        ctx.restore();
+      }
     }
 
     // war scars layer — deepen the ink when viewed strategically
@@ -333,6 +347,7 @@ export class TerrainRenderer {
     const t = this.terrain;
     this.drawFields(ctx, cam);
     this.drawDryStream(ctx, cam);
+    this.drawRunways(ctx, cam);
     this.drawRailway(ctx, cam);
     this.drawRoads(ctx, cam);
     this.drawRiver(ctx, cam);
@@ -360,11 +375,11 @@ export class TerrainRenderer {
     const t = this.terrain;
     const sea = t.sea;
     const zoom = cam.zoom;
-    // the sea's rough bounds on this sheet
-    const x0 = Math.max(cam.viewX - 60, 2100);
-    const y0 = Math.max(cam.viewY - 60, 1900);
-    const x1 = Math.min(cam.viewX + cam.viewW + 60, t.W);
-    const y1 = Math.min(cam.viewY + cam.viewH + 60, t.H);
+    // the sea's rough bounds on this sheet — from the authored coast
+    const x0 = Math.max(cam.viewX - 60, sea.bounds.x0);
+    const y0 = Math.max(cam.viewY - 60, sea.bounds.y0);
+    const x1 = Math.min(cam.viewX + cam.viewW + 60, sea.bounds.x1);
+    const y1 = Math.min(cam.viewY + cam.viewH + 60, sea.bounds.y1);
     if (x1 <= x0 || y1 <= y0) return;
 
     // ── open-water swell: short comma strokes, drifting ──
@@ -502,7 +517,7 @@ export class TerrainRenderer {
     }
   }
 
-  /** PORT VELIKY — piers, gantry cranes, breakwater, buoys */
+  /** PORT AZURE — piers, gantry cranes, breakwater, buoys */
   private drawHarbour(
     ctx: CanvasRenderingContext2D,
     cam: Camera,
@@ -884,11 +899,98 @@ export class TerrainRenderer {
     ctx.restore();
   }
 
+/** airfield paving — pale concrete slabs with centreline + threshold */
+  private drawRunways(ctx: CanvasRenderingContext2D, cam: Camera) {
+    const t = this.terrain;
+    if (!t.runways.length) return;
+    for (const rw of t.runways) {
+      if (rw.x + rw.len < cam.viewX - 80 || rw.x - rw.len > cam.viewX + cam.viewW + 80) continue;
+      if (rw.y + rw.len < cam.viewY - 80 || rw.y - rw.len > cam.viewY + cam.viewH + 80) continue;
+      ctx.save();
+      ctx.translate(rw.x, rw.y);
+      ctx.rotate(rw.angle);
+      if (rw.kind === 'RUNWAY') {
+        // graded shoulders
+        ctx.fillStyle = 'rgba(206,201,188,0.7)';
+        ctx.fillRect(-rw.len / 2 - 8, -rw.w / 2 - 8, rw.len + 16, rw.w + 16);
+        // the slab
+        ctx.fillStyle = '#d9d5c6';
+        ctx.fillRect(-rw.len / 2, -rw.w / 2, rw.len, rw.w);
+        ctx.strokeStyle = 'rgba(74,69,58,0.85)';
+        ctx.lineWidth = 1.4;
+        ctx.strokeRect(-rw.len / 2, -rw.w / 2, rw.len, rw.w);
+        // centreline dashes
+        ctx.strokeStyle = 'rgba(96,91,78,0.8)';
+        ctx.lineWidth = Math.max(1, 1.1);
+        ctx.setLineDash([18, 14]);
+        ctx.beginPath();
+        ctx.moveTo(-rw.len / 2 + 18, 0);
+        ctx.lineTo(rw.len / 2 - 18, 0);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // threshold bars
+        ctx.fillStyle = 'rgba(70,66,55,0.85)';
+        for (const side of [-1, 1]) {
+          for (let i = -2; i <= 2; i++) {
+            ctx.fillRect(side * (rw.len / 2 - 16) + (side < 0 ? -6 : 0), i * (rw.w / 6) - 1.6, 10, 3.2);
+          }
+        }
+        // runway numbers, facing the landing pilot
+        if (cam.zoom > 0.35) {
+          ctx.fillStyle = 'rgba(60,56,46,0.9)';
+          ctx.font = '600 13px ui-monospace, monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.save();
+          ctx.translate(rw.len / 2 - 34, 0);
+          ctx.rotate(Math.PI / 2);
+          ctx.fillText('09', 0, 0);
+          ctx.restore();
+          ctx.save();
+          ctx.translate(-rw.len / 2 + 34, 0);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillText('27', 0, 0);
+          ctx.restore();
+        }
+      } else if (rw.kind === 'TAXI') {
+        ctx.fillStyle = '#d5d1c1';
+        ctx.fillRect(-rw.len / 2, -rw.w / 2, rw.len, rw.w);
+        ctx.strokeStyle = 'rgba(90,85,72,0.7)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-rw.len / 2, -rw.w / 2, rw.len, rw.w);
+      } else {
+        // apron — a wide pale slab with joint lines
+        ctx.fillStyle = 'rgba(216,212,199,0.92)';
+        ctx.fillRect(-rw.len / 2, -rw.w / 2, rw.len, rw.w);
+        ctx.strokeStyle = 'rgba(90,85,72,0.55)';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        for (let x = -rw.len / 2; x <= rw.len / 2; x += 14) {
+          ctx.moveTo(x, -rw.w / 2);
+          ctx.lineTo(x, rw.w / 2);
+        }
+        for (let y = -rw.w / 2; y <= rw.w / 2; y += 14) {
+          ctx.moveTo(-rw.len / 2, y);
+          ctx.lineTo(rw.len / 2, y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
   private drawRailway(ctx: CanvasRenderingContext2D, cam: Camera) {
     const t = this.terrain;
     const zoom = cam.zoom;
     const inc = this.visibleMask(t.railway, cam, 80);
     if (!inc.some(Boolean)) return;
+    // freight spurs — same engineering, lighter treatment
+    for (const spur of t.railSpurs) {
+      const si = this.visibleMask(spur, cam, 80);
+      if (!si.some(Boolean)) continue;
+      this.strokePolyView(ctx, spur, si, 9, 'rgba(208,203,189,0.7)');
+      this.strokePolyView(ctx, spur, si, 1.2, 'rgba(70,66,56,0.7)', [10, 12]);
+    }
     // embankment
     this.strokePolyView(ctx, t.railway, inc, 13, 'rgba(214,209,196,0.8)');
     this.strokePolyView(ctx, t.railway, inc, 10, 'rgba(203,198,184,0.9)');
@@ -1093,6 +1195,9 @@ export class TerrainRenderer {
       ctx.fillRect(-b.w / 2 + 3.4, -b.h / 2 + 4.2, b.w, b.h);
       // body — fire and blast darken the walls before they fall
       let fill = '#e6e3d8';
+      if (b.kind === 'BLOCK') fill = '#ded9ca';
+      if (b.kind === 'HANGAR') fill = '#d9d4c4';
+      if (b.kind === 'TOWER') fill = '#d4cfc0';
       if (b.kind === 'HQ_CORE') fill = '#dcd8ca';
       if (b.kind === 'BUNKER') fill = '#c9c4b5';
       if (b.kind === 'SHED') fill = '#e0dccd';
@@ -1347,6 +1452,101 @@ export class TerrainRenderer {
         ctx.beginPath();
         ctx.arc(b.w * 0.18, b.w * 0.18, b.w * 0.34, 0, Math.PI * 2);
         ctx.fill();
+      } else if (b.kind === 'BLOCK') {
+        // apartment slab — a heavy roof with stairwell cores, courtyard
+        // seams and chimney stacks. The city reads by weight.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-b.w / 2 + 1, -b.h / 2 + 1, b.w - 2, b.h - 2);
+        ctx.clip();
+        // roof field
+        ctx.fillStyle = 'rgba(120,114,100,0.28)';
+        ctx.fillRect(-b.w / 2 + 2, -b.h / 2 + 2, b.w - 4, b.h - 4);
+        // stairwell cores — two pale blocks
+        ctx.fillStyle = 'rgba(240,238,229,0.95)';
+        const cw = Math.min(6, b.w * 0.16);
+        ctx.fillRect(-b.w / 2 + b.w * 0.22 - cw / 2, -b.h / 2 + 2.4, cw, b.h - 4.8);
+        ctx.fillRect(b.w / 2 - b.w * 0.22 - cw / 2, -b.h / 2 + 2.4, cw, b.h - 4.8);
+        // chimney stacks on the long axis
+        ctx.fillStyle = 'rgba(70,66,55,0.8)';
+        for (const cx3 of [-b.w * 0.34, 0, b.w * 0.34]) {
+          ctx.fillRect(cx3 - 1.1, -b.h / 2 + 2.2, 2.2, 2.6);
+        }
+        ctx.restore();
+        if (zoom > 0.75) {
+          // courtyard seam — the entrance side
+          ctx.strokeStyle = 'rgba(88,83,72,0.65)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(-b.w / 2 + 3, b.h * 0.18);
+          ctx.lineTo(b.w / 2 - 3, b.h * 0.18);
+          ctx.stroke();
+        }
+      } else if (b.kind === 'HANGAR') {
+        // arched aircraft shed — ribbed vault, big doors on the apron side
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-b.w / 2 + 1, -b.h / 2 + 1, b.w - 2, b.h - 2);
+        ctx.clip();
+        ctx.strokeStyle = 'rgba(96,90,76,0.8)';
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        const ribs = Math.max(5, Math.round(b.w / 7));
+        for (let i = 1; i < ribs; i++) {
+          const x0 = -b.w / 2 + (i * b.w) / ribs;
+          ctx.moveTo(x0, -b.h / 2 + 1);
+          ctx.lineTo(x0, b.h / 2 - 1);
+        }
+        ctx.stroke();
+        // the vault ridge
+        ctx.strokeStyle = 'rgba(64,60,50,0.9)';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(-b.w / 2 + 2, 0);
+        ctx.lineTo(b.w / 2 - 2, 0);
+        ctx.stroke();
+        ctx.restore();
+        // the big sliding doors — pale mouth on the south face
+        ctx.fillStyle = 'rgba(238,236,227,0.9)';
+        ctx.fillRect(-b.w * 0.18, b.h / 2 - 1, b.w * 0.36, 3);
+        ctx.strokeStyle = 'rgba(70,66,55,0.8)';
+        ctx.lineWidth = 0.9;
+        ctx.strokeRect(-b.w * 0.18, b.h / 2 - 1, b.w * 0.36, 3);
+      } else if (b.kind === 'TOWER') {
+        // airfield control tower — a cab on a shaft
+        ctx.fillStyle = '#cbc6b6';
+        ctx.beginPath();
+        ctx.arc(0, 0, b.w * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#4a453b';
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+        // the cab — glass ring with the windscreens drawn as spokes
+        ctx.fillStyle = '#b9b4a3';
+        ctx.beginPath();
+        ctx.arc(0, 0, b.w * 0.52, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(52,48,40,0.75)';
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2;
+          ctx.moveTo(Math.cos(a) * b.w * 0.3, Math.sin(a) * b.w * 0.3);
+          ctx.lineTo(Math.cos(a) * b.w * 0.52, Math.sin(a) * b.w * 0.52);
+        }
+        ctx.stroke();
+        if (detail) {
+          // the radar feed mast above the cab
+          ctx.strokeStyle = '#37332b';
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          ctx.moveTo(0, -b.w * 0.52);
+          ctx.lineTo(0, -b.w * 0.95);
+          ctx.moveTo(-2.4, -b.w * 0.95);
+          ctx.lineTo(2.4, -b.w * 0.95);
+          ctx.stroke();
+        }
       } else if (b.kind === 'RUIN') {
         // a broken structure — partial walls, rubble, no roof
         ctx.save();
@@ -1660,14 +1860,16 @@ export class TerrainRenderer {
   }
 
   private drawLabels(ctx: CanvasRenderingContext2D, cam: Camera) {
-    if (cam.zoom < 0.22) return;
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     for (const l of this.terrain.labels) {
-      if (l.x < cam.viewX - 120 || l.x > cam.viewX + cam.viewW + 120) continue;
-      if (l.y < cam.viewY - 60 || l.y > cam.viewY + cam.viewH + 60) continue;
-      const size = Math.min(l.size, 15 / cam.zoom + 6);
+      if (l.x < cam.viewX - 160 || l.x > cam.viewX + cam.viewW + 160) continue;
+      if (l.y < cam.viewY - 80 || l.y > cam.viewY + cam.viewH + 80) continue;
+      // world-metric type that shrinks toward a legible floor — the
+      // sheet stays annotated from theatre zoom down to the street
+      const size = clamp(l.size * cam.zoom, 8.5, l.size);
+      if (size < 8.5) continue;
       ctx.font = `${l.bold ? '600' : 'italic 500'} ${size}px Georgia, "Times New Roman", serif`;
       ctx.fillStyle = 'rgba(46,42,34,0.66)';
       // paper halo for readability
@@ -1680,7 +1882,7 @@ export class TerrainRenderer {
   }
 
   private drawSpotHeights(ctx: CanvasRenderingContext2D, cam: Camera) {
-    if (cam.zoom < 0.4) return;
+    if (cam.zoom < 0.22) return;
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1734,10 +1936,10 @@ export class TerrainRenderer {
     ctx.fillStyle = 'rgba(42,38,30,0.75)';
     ctx.textAlign = 'right';
     ctx.font = '600 22px Georgia, serif';
-    ctx.fillText('SHEET 3368-IV · SERIES Z4E · SCALE 1:10 000', t.W - 40, t.H + 18);
+    ctx.fillText('SHEET 3368-IV · SERIES Z4E · SCALE 1:20 000', t.W - 40, t.H + 18);
     ctx.textAlign = 'left';
     ctx.font = '600 22px Georgia, serif';
-    ctx.fillText('OPERATION CROSSWIND — THEATRE NORTH', 40, t.H + 18);
+    ctx.fillText('OPERATION CROSSWIND — AZURE COAST THEATRE', 40, t.H + 18);
     ctx.textAlign = 'left';
     ctx.font = '500 19px Georgia, serif';
     ctx.fillText('GRID: 1000 m SQUARES · ELEVATION IN METRES', 40, -44);

@@ -11,6 +11,12 @@ export type UnitType =
   | 'M2A3'
   | 'M109A7'
   | 'M1127'
+  | 'RIFLE'
+  | 'VULCAN'
+  | 'LINEBACKER'
+  | 'NASAMS'
+  | 'PATRIOT'
+  | 'F16C'
   | 'A10C'
   | 'T90M'
   | 'BMP3'
@@ -18,6 +24,7 @@ export type UnitType =
   | '2S19'
   | 'TOR'
   | 'PANTSIR'
+  | 'BUK'
   | 'SU25K'
   | 'PATROL'
   | 'FRIGATE'
@@ -66,6 +73,21 @@ export interface UnitDef {
   standoff?: [number, number];
   /** turret mounts — weapon layout, per class (see shipDraw.ts) */
   mounts?: number;
+  /** air-defence system parameters — detection, tracking, engagement */
+  aa?: {
+    /** acquisition radar radius (m) — detection precedes engagement */
+    radar: number;
+    /** weapon engagement envelope (m) */
+    range: number;
+    /** seconds of continuous track before weapons release */
+    lock: number;
+    /** gun systems engage aircraft on the deck only — high orbits are safe */
+    lowOnly?: boolean;
+    /** heavy SAMs must be emplaced (near-stationary) to fire */
+    emplace?: boolean;
+    /** seconds per round for the crew to reload from reserve */
+    regen?: number;
+  };
 }
 
 function def(p: Partial<UnitDef> & { type: UnitType; kind: UnitKind; name: string; shortName: string; role: string; faction: Faction }): UnitDef {
@@ -127,6 +149,62 @@ export const UNIT_DEFS: Record<UnitType, UnitDef> = {
     ammo: 480, projectile: 'AUTO', accuracy: 0.82,
     bounty: 22, length: 6.9, width: 2.9,
   }),
+  RIFLE: def({
+    type: 'RIFLE', kind: 'INF', name: 'RIFLE SQUAD', shortName: 'INF',
+    role: 'DISMOUNTED INFANTRY', faction: 'FRIEND',
+    hp: 30, speed: 5.2, turnRate: 2.6, turretRate: 4, vision: 580,
+    range: 300, damage: 1.6, burst: 4, burstInterval: 0.18, reload: 2.0,
+    ammo: 420, projectile: 'AUTO', accuracy: 0.7,
+    bounty: 12, length: 5.6, width: 3.6,
+  }),
+
+  // ── friendly air defence — four systems, four doctrines ──
+  // GUN AA: cheap, fast, low skies only. SHORAD: rolls with the armour.
+  // NASAMS: the frontline umbrella. PATRIOT: the theatre shield.
+  VULCAN: def({
+    type: 'VULCAN', kind: 'SPAA', name: 'M163A2 VULCAN', shortName: 'GUN AA',
+    role: 'SELF-PROPELLED ANTI-AIRCRAFT GUN', faction: 'FRIEND',
+    hp: 50, speed: 13.5, turnRate: 1.7, turretRate: 4.5, vision: 950,
+    range: 900, damage: 2.8, burst: 9, burstInterval: 0.055, reload: 1.5,
+    ammo: 1400, projectile: 'AUTO', accuracy: 0.72, canHitAir: true,
+    bounty: 26, length: 6.4, width: 3.1,
+    aa: { radar: 1100, range: 900, lock: 0.5, lowOnly: true },
+  }),
+  LINEBACKER: def({
+    type: 'LINEBACKER', kind: 'SPAA', name: 'M6 LINEBACKER', shortName: 'SHORAD',
+    role: 'SHORT-RANGE AIR DEFENCE', faction: 'FRIEND',
+    hp: 55, speed: 12.5, turnRate: 1.5, turretRate: 3.6, vision: 1300,
+    range: 1250, damage: 34, reload: 3.4, ammo: 8, projectile: 'MISSILE_SPAA',
+    accuracy: 0.7, canHitAir: true,
+    bounty: 34, length: 6.5, width: 3.2,
+    aa: { radar: 1500, range: 1250, lock: 1.4, regen: 26 },
+  }),
+  NASAMS: def({
+    type: 'NASAMS', kind: 'SPAA', name: 'NASAMS II LAUNCHER', shortName: 'SAM',
+    role: 'MEDIUM-RANGE AIR DEFENCE', faction: 'FRIEND',
+    hp: 60, speed: 8.5, turnRate: 1.1, turretRate: 2.5, vision: 2200,
+    range: 2400, damage: 42, reload: 4.6, ammo: 6, projectile: 'MISSILE_SPAA',
+    accuracy: 0.75, canHitAir: true,
+    bounty: 52, length: 8.6, width: 3.0,
+    aa: { radar: 3000, range: 2400, lock: 2.2, emplace: true, regen: 30 },
+  }),
+  PATRIOT: def({
+    type: 'PATRIOT', kind: 'SPAA', name: 'MIM-104 PATRIOT PAC-3', shortName: 'LR SAM',
+    role: 'LONG-RANGE AIR DEFENCE', faction: 'FRIEND',
+    hp: 65, speed: 5.5, turnRate: 0.7, turretRate: 2, vision: 3200,
+    range: 3800, damage: 55, reload: 6.0, ammo: 4, projectile: 'MISSILE_SPAA',
+    accuracy: 0.8, canHitAir: true,
+    bounty: 74, length: 10.2, width: 3.4,
+    aa: { radar: 4200, range: 3800, lock: 3.0, emplace: true, regen: 38 },
+  }),
+  F16C: def({
+    type: 'F16C', kind: 'AIR', name: 'F-16C VIPER', shortName: 'FTR',
+    role: 'AIR SUPERIORITY FIGHTER', faction: 'FRIEND',
+    hp: 70, speed: 78, turnRate: 1.05, turretRate: 6, vision: 1300,
+    range: 950, damage: 38, reload: 1.6, ammo: 4,
+    projectile: 'MISSILE_AIR', accuracy: 0.85, canHitAir: true, isAir: true,
+    bounty: 62, length: 15.1, width: 9.5,
+  }),
   A10C: def({
     type: 'A10C', kind: 'AIR', name: 'A-10C THUNDERBOLT II', shortName: 'CAS',
     role: 'ATTACK AIRCRAFT', faction: 'FRIEND',
@@ -175,6 +253,7 @@ export const UNIT_DEFS: Record<UnitType, UnitDef> = {
     range: 1500, damage: 30, reload: 3.2, ammo: 12, projectile: 'MISSILE_SPAA',
     accuracy: 0.68, canHitAir: true,
     bounty: 36, length: 7.2, width: 3.4,
+    aa: { radar: 1200, range: 1500, lock: 1.3, regen: 22 },
   }),
   PANTSIR: def({
     type: 'PANTSIR', kind: 'SPAA', name: 'PANTSIR-S1', shortName: 'SAM',
@@ -183,6 +262,16 @@ export const UNIT_DEFS: Record<UnitType, UnitDef> = {
     range: 1650, damage: 30, reload: 3.6, ammo: 12, projectile: 'MISSILE_SPAA',
     accuracy: 0.66, canHitAir: true,
     bounty: 36, length: 7.9, width: 3.1,
+    aa: { radar: 1400, range: 1650, lock: 1.2, regen: 24 },
+  }),
+  BUK: def({
+    type: 'BUK', kind: 'SPAA', name: '9K37 BUK TELAR', shortName: 'SAM',
+    role: 'MEDIUM-RANGE AIR DEFENCE', faction: 'ENEMY',
+    hp: 58, speed: 9, turnRate: 1.1, turretRate: 2.5, vision: 2000,
+    range: 2200, damage: 40, reload: 4.4, ammo: 6, projectile: 'MISSILE_SPAA',
+    accuracy: 0.72, canHitAir: true,
+    bounty: 48, length: 8.8, width: 3.3,
+    aa: { radar: 2800, range: 2200, lock: 2.0, emplace: true, regen: 30 },
   }),
   HQ: def({
     type: 'HQ', kind: 'HQ', name: 'KRAKEN GROUP HQ', shortName: 'HQ',
@@ -265,6 +354,7 @@ export function kindLabel(kind: UnitKind): string {
     case 'IFV': return 'MECH';
     case 'SPG': return 'ARTY';
     case 'REC': return 'RECCE';
+    case 'INF': return 'INF';
     case 'AIR': return 'AIR';
     case 'SPAA': return 'AD';
     case 'HQ': return 'HQ';

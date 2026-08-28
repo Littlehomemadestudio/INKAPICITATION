@@ -94,6 +94,9 @@ export class Sea {
 
   private coastNoise: Noise2D;
 
+  /** sea's rough world bounds — the renderer culls with this */
+  bounds = { x0: 0, y0: 0, x1: 0, y1: 0 };
+
   constructor(seed: number, W: number, H: number) {
     this.seed = seed >>> 0;
     this.W = W;
@@ -109,30 +112,43 @@ export class Sea {
   // ── authoring ──────────────────────────────────────────────
 
   private authorCoast() {
-    // The shoreline of VELIKIY BAY. The diagonal SW reach is low
-    // beach; the headland by the harbour is rock; the eastern
-    // shore behind the breakwater is worked ground.
+    // The southern shore of the theatre. The ocean owns everything south
+    // of this line, and AZURE BAY is the great northward dent in its
+    // middle — the river SEVERNAYA meets the sea at the bay's head, where
+    // NOVY GOROD stands. The west reach is low beach and marsh; the
+    // headland east of the port is cliff; the harbour cove between them
+    // is worked ground.
     const pts: Vec2[] = [
-      { x: 2140, y: this.H + 60 },
-      { x: 2380, y: 2900 },
-      { x: 2650, y: 2680 },
-      { x: 2900, y: 2480 },
-      { x: 3120, y: 2320 },
-      { x: 3320, y: 2220 }, // harbour cove
-      { x: 3560, y: 2160 }, // headland
-      { x: 3800, y: 2130 },
-      { x: this.W + 60, y: 2070 },
+      { x: -80, y: 5050 },
+      { x: 700, y: 5200 },
+      { x: 1700, y: 5350 },
+      { x: 2600, y: 5450 },
+      { x: 3300, y: 5000 }, // bay west shore
+      { x: 3750, y: 4480 }, // bay NW shore — beach
+      { x: 4150, y: 4180 }, // estuary — the city stands here
+      { x: 4650, y: 4220 }, // PORT AZURE cove
+      { x: 5250, y: 4480 }, // harbour east
+      { x: 5700, y: 4350 }, // headland west face
+      { x: 6050, y: 4180 }, // headland tip — the coastal SAM site
+      { x: 6350, y: 4480 }, // headland east face
+      { x: 7300, y: 4620 },
+      { x: this.W + 80, y: 4480 },
     ];
     const types: CoastType[] = [
-      'MARSH', // southern point — reeds
+      'MARSH', // reeds at the west edge
       'BEACH',
       'BEACH',
       'BEACH',
+      'BEACH', // bay west shore
       'BEACH',
-      'HARBOUR', // the cove itself
+      'HARBOUR', // the estuary city waterfront
+      'HARBOUR', // PORT AZURE itself
+      'HARBOUR',
       'CLIFF', // headland rock
       'CLIFF',
       'CLIFF',
+      'BEACH',
+      'BEACH',
     ];
     this.coast = [];
     for (let i = 0; i < pts.length - 1; i++) {
@@ -160,12 +176,24 @@ export class Sea {
         });
       }
     }
-    // close the ring through the off-map corner so the eastern
-    // approaches are honest water in the point test
-    const last = this.coast[this.coast.length - 1].b;
+    // close the ring through the southern off-map margin so the whole
+    // ocean south of the coast — bay, islands and all — is honest water
     this.seaRing = this.shore.map((p) => ({ x: p.x, y: p.y }));
-    this.seaRing.push({ x: last.x, y: this.H + 80 });
-    this.seaRing.push({ x: last.x - 40, y: this.H + 80 });
+    const last = this.coast[this.coast.length - 1].b;
+    this.seaRing.push({ x: last.x, y: this.H + 120 });
+    this.seaRing.push({ x: -80, y: this.H + 120 });
+    // renderer cull bounds — the sea's own envelope
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let y0 = Infinity;
+    let y1 = -Infinity;
+    for (const p of this.shore) {
+      x0 = Math.min(x0, p.x);
+      x1 = Math.max(x1, p.x);
+      y0 = Math.min(y0, p.y);
+      y1 = Math.max(y1, p.y);
+    }
+    this.bounds = { x0, y0, x1, y1: this.H };
   }
 
   private authorIslands() {
@@ -175,24 +203,25 @@ export class Sea {
       for (let i = 0; i < 16; i++) p.push(0.82 + r.next() * 0.36);
       return p;
     };
-    // OSTROV BOLSHOY — the big island that splits the bay. It sits
-    // high enough that BOTH channels admit a deep-draft hull
+    // OSTROV VOLNY — the big island of the eastern sea. It splits the
+    // approaches: the fleet anchorage shelters behind it, and both
+    // channels admit a deep-draft hull.
     this.islands.push({
-      x: 3300, y: 2650, rx: 168, ry: 100, rot: 0.5,
+      x: 6900, y: 5350, rx: 300, ry: 200, rot: 0.35,
       profile: mkProfile(this.seed ^ 0xB01),
-      name: 'OSTROV BOLSHOY',
-      height: 15,
+      name: 'OSTROV VOLNY',
+      height: 16,
     });
-    // the islet by the eastern channel
+    // KAMEN ISLET — guards the bay mouth
     this.islands.push({
-      x: 3860, y: 2520, rx: 62, ry: 46, rot: -0.3,
+      x: 5600, y: 5450, rx: 80, ry: 60, rot: -0.3,
       profile: mkProfile(this.seed ^ 0x151),
       name: 'KAMEN ISLET',
       height: 9,
     });
-    // shoal islet near the SW bay mouth
+    // the shoal islet off the west bay mouth
     this.islands.push({
-      x: 2950, y: 2980, rx: 44, ry: 34, rot: 0.2,
+      x: 3300, y: 5800, rx: 55, ry: 40, rot: 0.2,
       profile: mkProfile(this.seed ^ 0x50A1),
       name: '',
       height: 6,
@@ -200,39 +229,41 @@ export class Sea {
   }
 
   private authorHarbour() {
-    // PORT VELIKIY — a working naval harbour in the cove. Piers
+    // PORT AZURE — a working naval harbour in the cove east of the river
     // run seaward (≈SE), warehouses stand on the shore, a stone
     // breakwater shelters the anchorage from the east swell.
     const piers: Pier[] = [
-      { x: 3262, y: 2268, angle: 1.30, len: 108, w: 13 },
-      { x: 3336, y: 2252, angle: 1.22, len: 132, w: 15 },
-      { x: 3408, y: 2238, angle: 1.14, len: 96, w: 13 },
+      { x: 4600, y: 4320, angle: 1.95, len: 128, w: 14 },
+      { x: 4790, y: 4340, angle: 1.75, len: 152, w: 16 },
+      { x: 4980, y: 4370, angle: 1.55, len: 118, w: 14 },
     ];
     const breakwater: Vec2[] = [
-      { x: 3470, y: 2436 },
-      { x: 3620, y: 2350 },
-      { x: 3772, y: 2272 },
+      { x: 5150, y: 4740 },
+      { x: 5300, y: 4970 },
+      { x: 5520, y: 5130 },
     ];
     const buoys: Buoy[] = [
-      { x: 3940, y: 2720, kind: 'GREEN' },
-      { x: 3740, y: 2570, kind: 'RED' },
-      { x: 3570, y: 2470, kind: 'GREEN' },
-      { x: 2880, y: 2820, kind: 'RED' }, // SW bay mouth marker
+      { x: 5700, y: 4850, kind: 'GREEN' },
+      { x: 5850, y: 5150, kind: 'RED' },
+      { x: 5350, y: 4550, kind: 'GREEN' },
+      { x: 4300, y: 5000, kind: 'RED' }, // west bay mouth marker
     ];
     const warehouses = [
-      { x: 3256, y: 2196, w: 30, h: 17, rot: 0.10 },
-      { x: 3308, y: 2190, w: 26, h: 15, rot: -0.16 },
-      { x: 3362, y: 2184, w: 32, h: 16, rot: 0.05 },
+      { x: 4620, y: 4240, w: 34, h: 18, rot: 0.08 },
+      { x: 4720, y: 4230, w: 28, h: 16, rot: -0.12 },
+      { x: 4840, y: 4250, w: 36, h: 17, rot: 0.04 },
+      { x: 4960, y: 4270, w: 30, h: 16, rot: -0.08 },
     ];
     const cranes = [
-      { x: 3262, y: 2268 + 70, rot: 1.30 }, // pier head gantries
-      { x: 3408, y: 2238 + 62, rot: 1.14 },
+      { x: 4600, y: 4320 + 84, rot: 1.95 }, // pier head gantries
+      { x: 4980, y: 4370 + 76, rot: 1.55 },
     ];
     const tanks = [
-      { x: 3438, y: 2150 },
-      { x: 3466, y: 2160 },
+      { x: 5080, y: 4320 },
+      { x: 5110, y: 4345 },
+      { x: 5050, y: 4365 },
     ];
-    this.harbour = { name: 'PORT VELIKIY', pos: { x: 3330, y: 2260 }, piers, breakwater, buoys, warehouses, cranes, tanks };
+    this.harbour = { name: 'PORT AZURE', pos: { x: 4800, y: 4430 }, piers, breakwater, buoys, warehouses, cranes, tanks };
   }
 
   // ── geometry queries ───────────────────────────────────────
@@ -617,7 +648,7 @@ export class Sea {
   }
 
   /** where the fleet reinforcement stream arrives from open water */
-  entry = { x: 4060, y: 3010 };
+  entry = { x: 8000, y: 5900 };
   /** friendly fleet anchorage in the eastern bay */
-  anchorage = { x: 3760, y: 2840 };
+  anchorage = { x: 7050, y: 5650 };
 }

@@ -101,7 +101,7 @@ export class Unit {
 
   // aircraft
   airState: AirState = 'STANDBY';
-  patrol: Vec2 = { x: 2048, y: 1536 };
+  patrol: Vec2 = { x: 0, y: 0 };
   orbitDir = 1;
   bank = 0;
   rearmT = 0;
@@ -122,6 +122,10 @@ export class Unit {
   mounts: MountState[] = [];
   /** independent air-defence target (SAM/CIWS engage aircraft) */
   airTarget: Unit | null = null;
+  /** ground air defence: seconds of continuous radar track on airTarget */
+  trackT = 0;
+  /** reload drill timer — crews feed the launcher from reserve */
+  private ammoRegenT = 0;
   /** shore bombardment point — an ordered target the guns walk onto */
   navalAreaTarget: { x: number; y: number } | null = null;
   sinking = false;
@@ -145,6 +149,7 @@ export class Unit {
     this.rng = new RNG((seedBase + this.id * 7919) >>> 0);
     if (this.def.isAir) {
       this.airState = 'STANDBY';
+      this.patrol = { x, y };
     }
     if (this.isShip) {
       this.mounts = createMountStates(type);
@@ -163,6 +168,12 @@ export class Unit {
 
   get draft(): number {
     return this.def.draft ?? 40;
+  }
+
+  /** aircraft on the deck — committed attack runs. Orbiting jets
+   *  fly above gun-AA ceilings; missiles reach them regardless. */
+  get lowAlt(): boolean {
+    return this.isAir && this.runPhase !== 'ORBIT';
   }
 
   // ── orders ─────────────────────────────────────────────────
@@ -322,6 +333,8 @@ export class Unit {
     }
     this.updateTargeting(dt, ctx);
     this.updateFiring(dt, ctx);
+    // ground air defence: detection, tracking, engagement — its own war
+    if (this.def.kind === 'SPAA' && !this.isShip) this.updateAirDefense(dt, ctx);
     this.updateSurfaceFx(dt, ctx);
   }
 
@@ -612,7 +625,8 @@ export class Unit {
         // role preferences
         if (this.def.kind === 'MBT') s += u.def.kind === 'MBT' ? 24 : u.def.kind === 'SPAA' ? 30 : 0;
         if (this.def.kind === 'IFV' || this.def.kind === 'REC') s += u.def.kind === 'REC' ? 18 : u.def.kind === 'IFV' ? 10 : 0;
-        if (this.def.kind === 'SPAA') continue; // air defence does not engage ground
+        if (this.def.kind === 'INF') s += u.def.kind === 'INF' ? 26 : u.def.kind === 'SPG' ? 18 : 0;
+        if (this.def.kind === 'SPAA') continue; // air defence fights aircraft only — see updateAirDefense
         if (u.isAir && !this.def.canHitAir) continue;
         if (s > bestScore) {
           bestScore = s;
@@ -758,6 +772,155 @@ export class Unit {
     }
   }
 
+  // ── ground air defence: DETECT → TRACK → ENGAGE ──────────
+  // No omniscience: a battery must first see the aircraft inside its
+  // acquisition radar, hold a track long enough for a firing solution,
+  // and only then commit a round — and the aircraft gets a say too.
+
+  private updateAirDefense(dt: number, ctx: SimContext) {
+    const aa = this.def.aa;
+    if (!aa) return;
+
+    // crews reload from the reserve — a battery is never permanently dry
+    if (aa.regen && this.ammo < this.def.ammo) {
+      this.ammoRegenT += dt;
+      if (this.ammoRegenT >= aa.regen) {
+        this.ammoRegenT = 0;
+        this.ammo++;
+        if (this.faction === 'FRIEND' && this.def.projectile !== 'AUTO') {
+          ctx.log(`${this.callsign} · LAUNCHER RELOADED — ${this.ammo} ROUNDS READY`, 'info');
+        }
+      }
+    } else {
+      this.ammoRegenT = 0;
+    }
+
+    // validate the current track — the sky is wide and cluttered
+    if (this.airTarget) {
+      const t = this.airTarget;
+      const d = dist(this.x, this.y, t.x, t.y);
+      if (t.dead || !this.sees(t) || d > aa.radar * 1.15) {
+        this.airTarget = null;
+        this.trackT = Math.max(0, this.trackT - dt * 2);
+      }
+    }
+    // acquire the closest aircraft inside the acquisition radar —
+    // parked aircraft are dispersed at an airfield, not on the sheet
+    if (!this.airTarget) {
+      let best: Unit | null = null;
+      let bd = Infinity;
+      for (const u of this.visibleTargets) {
+        if (u.dead || !u.isAir || u.faction === this.faction) continue;
+        if (u.airState === 'STANDBY' || u.airState === 'REARM') continue;
+        const d = dist(this.x, this.y, u.x, u.y);
+        if (d < aa.radar && d < bd) {
+          bd = d;
+          best = u;
+        }
+      }
+      if (best) {
+        this.airTarget = best;
+        this.trackT = 0;
+      }
+    }
+
+    const t = this.airTarget;
+    if (!t) return;
+    const d = dist(this.x, this.y, t.x, t.y);
+
+    // steady contact inside the radar builds a firing solution
+    if (d <= aa.radar && this.sees(t)) this.trackT += dt;
+    else this.trackT = Math.max(0, this.trackT - dt * 1.5);
+
+    // the turret minds the sky
+    const lead = this.airLead(t, this.def.projectile === 'AUTO' ? 640 : 220);
+    this.turretAngle = rotateToward(this.turretAngle, angleOf(lead.x - this.x, lead.y - this.y), this.def.turretRate * dt);
+
+    // heavy SAMs emplace before the radar works
+    if (aa.emplace && this.speedNow > 0.8) return;
+
+    // gun system: tracer streams at anything on the deck
+    if (this.def.projectile === 'AUTO') {
+      if (this.burstLeft > 0) {
+        this.burstT -= dt;
+        if (this.burstT <= 0 && !t.dead) {
+          this.burstT = this.def.burstInterval;
+          this.burstLeft--;
+          ctx.projectiles.fireAuto(ctx, this, lead.x, lead.y, this.def.damage, this.airAimQuality(t, d, aa));
+          this.ammo--;
+          this.recoil = 0.35;
+          this.lastFireT = ctx.time;
+          if (this.ammo <= 0) {
+            this.burstLeft = 0;
+            ctx.log(`${this.callsign} · AMMUNITION EXPENDED`, 'alert');
+          }
+        }
+        return;
+      }
+      if (this.reloadT > 0 || this.ammo <= 0) return;
+      if (!t.lowAlt && d > 420) return; // above the gun ceiling
+      if (d > aa.range || d < 40) return;
+      if (this.trackT < aa.lock) return;
+      if (this.pinned && this.rng.chance(0.6)) return;
+      this.burstLeft = this.def.burst;
+      this.burstT = 0;
+      this.reloadT = this.def.reload;
+      return;
+    }
+
+    // missile system
+    if (this.reloadT > 0 || this.ammo <= 0) return;
+    if (d > aa.range || d < 90) return;
+    if (this.trackT < aa.lock) return;
+    if (this.pinned && this.rng.chance(0.5)) return;
+    ctx.projectiles.fireSAM(ctx, this, t, this.def.damage, { evade: this.samEvade(t, d, aa) });
+    this.ammo--;
+    this.reloadT = this.def.reload;
+    this.recoil = 0.6;
+    this.lastFireT = ctx.time;
+    ctx.effects.spawnSmoke(this.x + Math.cos(this.turretAngle) * 5, this.y + Math.sin(this.turretAngle) * 5, {
+      r: 2.2,
+      r1: 13,
+      life: 1.8,
+      alpha: 0.38,
+    });
+    if (this.ammo === 0 && this.faction === 'FRIEND') {
+      ctx.log(`${this.callsign} · MAGAZINE EMPTY — CREWS RELOADING`, 'alert');
+    }
+  }
+
+  /** predicted intercept point for an aircraft */
+  private airLead(t: Unit, projSpeed: number): { x: number; y: number } {
+    const d = dist(this.x, this.y, t.x, t.y);
+    const tof = d / projSpeed;
+    const sp = t.isAir ? t.def.speed : t.speedNow;
+    return {
+      x: t.x + Math.cos(t.angle) * sp * tof,
+      y: t.y + Math.sin(t.angle) * sp * tof,
+    };
+  }
+
+  /** gunnery quality against a moving aircraft — track age, jinking, range */
+  private airAimQuality(t: Unit, d: number, aa: NonNullable<UnitDef['aa']>): number {
+    let q = clamp(0.4 + 0.6 * (this.trackT / Math.max(0.01, aa.lock)), 0.35, 1);
+    if (Math.abs(t.bank) > 0.45) q *= 0.6; // hard jinking defeats the gunner
+    q *= 1 - 0.3 * this.suppression;
+    q *= clamp(1 - (d / aa.range) * 0.3, 0.6, 1);
+    return clamp(q, 0.2, 1);
+  }
+
+  /** probability the aircraft defeats the missile — manoeuvre, terrain, class */
+  private samEvade(t: Unit, d: number, aa: NonNullable<UnitDef['aa']>): number {
+    let e = 0.3;
+    if (Math.abs(t.bank) > 0.45) e *= 1.6; // a hard break beats most seekers
+    if (t.lowAlt) e *= 1.2; // nap-of-the-earth masking
+    if (d > aa.range * 0.85) e *= 1.15; // the envelope edge is forgiving
+    if (this.def.type === 'PATRIOT') e *= 0.55; // the PAC-3 is a serious missile
+    else if (this.def.type === 'NASAMS' || this.def.type === 'BUK') e *= 0.8;
+    else if (this.def.type === 'LINEBACKER') e *= 1.1;
+    return clamp(e, 0.05, 0.7);
+  }
+
   // ── surface fx: dust & tracks ──────────────────────────────
 
   private updateSurfaceFx(dt: number, ctx: SimContext) {
@@ -848,6 +1011,7 @@ export class Unit {
       let bd = Infinity;
       for (const u of this.visibleTargets) {
         if (u.dead || !u.isAir) continue;
+        if (u.airState === 'STANDBY' || u.airState === 'REARM') continue;
         const d = dist(this.x, this.y, u.x, u.y);
         if (d < bd) {
           bd = d;
@@ -1045,7 +1209,9 @@ export class Unit {
           if (d > m.def.range) break;
           if (m.reload <= 0) {
             const mw = mountWorld(this, m);
-            ctx.projectiles.fireNavalSAM(ctx, this, mw, t, m.def);
+            // a jinking target can shake a naval SAM too
+            const evade = clamp(0.34 * (Math.abs(t.bank) > 0.45 ? 1.5 : 0.8), 0.08, 0.6);
+            ctx.projectiles.fireNavalSAM(ctx, this, mw, t, m.def, evade);
             m.ammo--;
             m.reload = m.def.reload;
             this.lastFireT = ctx.time;
@@ -1244,7 +1410,10 @@ export class Unit {
           const dd = dist(this.x, this.y, this.runTarget.x, this.runTarget.y);
           if (dd < this.def.range && Math.abs(diff) < 0.35 && this.ammo > 0 && this.reloadT <= 0) {
             // weapons away — then get out
-            ctx.projectiles.fireAGM(ctx, this, this.runTarget, this.def.damage, this.def.splash);
+            const aamEvade = this.def.canHitAir
+              ? clamp(0.3 * (Math.abs(this.runTarget.bank) > 0.45 ? 1.7 : 0.7), 0.05, 0.7)
+              : undefined;
+            ctx.projectiles.fireAGM(ctx, this, this.runTarget, this.def.damage, this.def.splash, aamEvade);
             this.ammo--;
             this.reloadT = this.def.reload;
             this.runPhase = 'EGRESS';
@@ -1291,12 +1460,15 @@ export class Unit {
 
         // pick a target and begin the dive
         if (this.ammo > 0 && this.reloadT <= 0 && (this.airState === 'PATROL' || this.airState === 'INBOUND')) {
+          const fighter = this.def.canHitAir; // the Viper hunts aircraft, not trucks
           let best: Unit | null = null;
           let bd = Infinity;
           for (const u of this.visibleTargets) {
-            if (u.dead || u.isAir || u.def.kind === 'FACTORY' || u.sinking) continue;
+            if (u.dead || u.def.kind === 'FACTORY' || u.sinking) continue;
+            if (u.isAir && (u.airState === 'STANDBY' || u.airState === 'REARM')) continue;
+            if (fighter ? !u.isAir : u.isAir) continue;
             const dd = dist(this.x, this.y, u.x, u.y);
-            if (dd < 1900 && dd < bd) {
+            if (dd < (fighter ? 2400 : 1900) && dd < bd) {
               const toT = angleOf(u.x - this.x, u.y - this.y);
               // prefer targets roughly ahead
               const off = Math.abs(angDiff(this.angle, toT));
@@ -1332,8 +1504,8 @@ export class Unit {
         // exit toward home airspace — friendlies recovered to the SW,
         // the enemy to his NE plateau
         const home = this.faction === 'FRIEND'
-          ? { x: -600, y: 3300 }
-          : { x: 4300, y: -300 };
+          ? { x: -600, y: 5400 }
+          : { x: 7800, y: -400 };
         const desired = angleOf(home.x - this.x, home.y - this.y);
         const diff = angDiff(this.angle, desired);
         this.angle += clamp(diff, -this.def.turnRate * dt, this.def.turnRate * dt);
@@ -1680,6 +1852,15 @@ export class Unit {
         case 'DOWN':
           return 'DESTROYED';
       }
+    }
+    if (this.def.kind === 'SPAA' && this.def.aa) {
+      // a system on the march is emplacing, whatever the sky is doing —
+      // the player needs to know WHY the battery is silent
+      if (this.def.aa.emplace && this.speedNow > 0.8) return 'EMPLACING';
+      if (this.airTarget && !this.airTarget.dead) {
+        return this.trackT >= this.def.aa.lock ? 'ENGAGING' : 'TRACKING';
+      }
+      return 'SEARCHING';
     }
     if (this.def.kind === 'FACTORY') {
       return 'HOLDING';

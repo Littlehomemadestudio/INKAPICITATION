@@ -361,6 +361,17 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
             </div>
           ))}
         </div>
+        <div className="font-mono text-[9px] tracking-[0.24em] text-[#6b6557] mb-2 border-b border-[#ddd9cd] pb-1">
+          THE SKY
+        </div>
+        <p className="text-[11.5px] leading-relaxed text-[#4c473d] mb-6">
+          Air defence is a duel, not a switch. A battery must first see an aircraft on its radar, hold the track for a
+          firing solution, and only then launch — and the aircraft answers with flares and hard turns. Gun AA reaches
+          only aircraft committed to attack runs; missiles reach the orbit. Heavy SAMs must emplace before they fire,
+          so placement is the decision: a battery behind the frontline guards everything inside its ring. The rings are
+          drawn on the ground when you select a system — the dashed circle is the radar, the hard circle the envelope.
+          The Viper fighter hunts enemy aircraft; the enemy's Buk hunts yours.
+        </p>
         <p className="text-[12px] leading-relaxed text-[#4c473d] mb-6">
           Ammunition is finite — spend it like a professional. Order artillery directly onto an observed enemy for
           corrected fire; order it onto empty ground and you will dig craters for nothing. Keep scouts forward: the

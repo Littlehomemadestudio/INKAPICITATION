@@ -661,7 +661,8 @@ export class Renderer {
         // laid on the terrain itself: stand here and this is your
         // world; move there and the rings tell you what changes.
         if (!u.isAir) {
-          const visR = u.def.vision * (1 - 0.3 * u.suppression);
+          const aa = u.def.aa;
+          const visR = aa ? Math.max(u.def.vision, aa.radar) : u.def.vision * (1 - 0.3 * u.suppression);
           ctx.strokeStyle = 'rgba(20,18,16,0.16)';
           ctx.setLineDash([12 / zoom, 10 / zoom]);
           ctx.lineWidth = Math.max(1, 1 / zoom);
@@ -676,6 +677,28 @@ export class Renderer {
             ctx.stroke();
           }
           ctx.setLineDash([]);
+          // air defence: the radar acquires at the outer ring, the
+          // missiles reach the inner one — and the lock line names
+          // the aircraft currently being walked onto
+          if (aa && u.airTarget && !u.airTarget.dead) {
+            const locked = u.trackT >= aa.lock;
+            ctx.strokeStyle = locked ? 'rgba(20,17,12,0.55)' : 'rgba(20,17,12,0.28)';
+            ctx.lineWidth = Math.max(0.9, 1.1 / zoom);
+            ctx.setLineDash(locked ? [10 / zoom, 6 / zoom] : [3 / zoom, 5 / zoom]);
+            ctx.beginPath();
+            ctx.moveTo(gx, gy);
+            ctx.lineTo(u.airTarget.x, u.airTarget.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            // track progress ticks at the launcher — a small arc that
+            // fills as the firing solution forms
+            const rr = u.def.length * 0.62 * Math.max(es, 1) + 10 / zoom;
+            ctx.strokeStyle = 'rgba(20,17,12,0.5)';
+            ctx.lineWidth = Math.max(1.4, 1.8 / zoom);
+            ctx.beginPath();
+            ctx.arc(gx, gy, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(u.trackT / aa.lock, 0, 1));
+            ctx.stroke();
+          }
         }
         // command path
         if (u.dest) {

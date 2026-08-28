@@ -53,12 +53,17 @@ export class InputSystem {
       if (!this.game.running || this.game.result) return;
 
       if (k === 'escape') {
-        if (this.cursorMode !== 'NORMAL') {
+        if (this.game.arsenalOpen) {
+          this.game.arsenalOpen = false;
+        } else if (this.cursorMode !== 'NORMAL') {
           this.cursorMode = 'NORMAL';
         } else {
           this.clearSelection();
         }
         this.game.audio.uiTick();
+      } else if (k === 'r') {
+        // the order of battle — inspect, price, commit
+        this.game.toggleArsenal();
       } else if (k === 'a') {
         if (this.selection.length) {
           this.cursorMode = this.cursorMode === 'ATTACK_MOVE' ? 'NORMAL' : 'ATTACK_MOVE';

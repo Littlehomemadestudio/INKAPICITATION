@@ -15,6 +15,8 @@ import { useState } from 'react';
 import type { HudSnapshot, LogEntry, BattalionDef } from '@/game/core/types';
 import type { Game } from '@/game/Game';
 import { fmtClock } from '@/game/Game';
+import type { Branch } from '@/game/entities/roster';
+import { UnitGlyph } from './UnitGlyph';
 
 interface TopBarProps {
   hud: HudSnapshot | null;
@@ -258,7 +260,13 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
         <div className="ps-panel ps-panel-deploy flex flex-col min-h-0">
           <div className="ps-header">
             <span>DEPLOY · ASSEMBLY ALPHA</span>
-            <span className="text-[#d9d6cc]">{hud?.ink ?? 0} INK</span>
+            <button
+              className="ps-ars-open"
+              onClick={() => gameRef.current?.toggleArsenal(true)}
+              title="Order of battle — full arsenal [R]"
+            >
+              ARSENAL [R]
+            </button>
           </div>
           <DeployBody hud={hud} gameRef={gameRef} />
         </div>
@@ -294,35 +302,43 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
   );
 }
 
-// ── deployment panel ──────────────────────────────────────────
+// ── deployment panel — the quick shelf of the arsenal ────────
+// Three branches, remembered. One click buys; [R] opens the
+// full order of battle for inspection before spending ink.
+
+let lastQuickBranch: Branch = 'GROUND';
+const QUICK_LABEL: Record<Branch, string> = { GROUND: 'GROUND', AIR: 'AIR', NAVAL: 'FLEET' };
 
 function DeployBody({ hud, gameRef }: { hud: HudSnapshot | null; gameRef: RefObject<Game | null> }) {
-  const [tab, setTab] = useState<'LAND' | 'SEA'>('LAND');
-  const battalions = (hud?.battalions ?? []).filter((b) => (!!b.naval) === (tab === 'SEA'));
+  const [tab, setTab] = useState<Branch>(lastQuickBranch);
+  const ink = hud?.ink ?? 0;
+  const battalions = (hud?.battalions ?? []).filter((b) => b.branch === tab);
   const production = hud?.production ?? [];
   const p0 = production[0];
+  const queueFull = production.length >= 6;
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-      {/* GROUND / FLEET — one war, two mediums. only the list scrolls */}
+      {/* GROUND / AIR / FLEET — one war, three mediums */}
       <div className="flex shrink-0 border-b border-[#242119]">
-        {(['LAND', 'SEA'] as const).map((t) => (
+        {(['GROUND', 'AIR', 'NAVAL'] as Branch[]).map((t) => (
           <button
             key={t}
-            className={`ps-tab flex-1 font-mono text-[9px] tracking-[0.22em] py-[3px] ${tab === t ? 'ps-tab-on' : ''}`}
+            className={`ps-tab flex-1 font-mono text-[9px] tracking-[0.2em] py-[3px] ${tab === t ? 'ps-tab-on' : ''}`}
             onClick={() => {
               setTab(t);
+              lastQuickBranch = t;
               const g = gameRef.current;
               if (g) g.audio.uiTick();
             }}
           >
-            {t === 'LAND' ? 'GROUND' : 'FLEET'}
+            {QUICK_LABEL[t]}
           </button>
         ))}
       </div>
       <div className="ps-scroll flex-1 min-h-0 overflow-y-auto">
-        <div className="ps-deploy-grid grid gap-1 p-1.5 content-start">
+        <div className="ps-quick-grid grid gap-1 p-1.5 content-start">
           {battalions.map((b) => (
-            <DeployButton key={b.id} b={b} gameRef={gameRef} ink={hud?.ink ?? 0} />
+            <QuickButton key={b.id} b={b} gameRef={gameRef} ink={ink} queueFull={queueFull} />
           ))}
           {!battalions.length && (
             <span className="font-mono text-[8.5px] text-[#5d584d] tracking-[0.14em] px-1 py-1.5">NOTHING AVAILABLE</span>
@@ -349,29 +365,34 @@ function DeployBody({ hud, gameRef }: { hud: HudSnapshot | null; gameRef: RefObj
   );
 }
 
-function DeployButton({ b, gameRef, ink }: { b: BattalionDef & { available: boolean }; gameRef: RefObject<Game | null>; ink: number }) {
-  const affordable = b.available;
+function QuickButton({
+  b,
+  gameRef,
+  ink,
+  queueFull,
+}: {
+  b: import('@/game/entities/roster').RosterEntry & { available: boolean };
+  gameRef: RefObject<Game | null>;
+  ink: number;
+  queueFull: boolean;
+}) {
+  const affordable = b.available && !queueFull;
   return (
     <button
-      className={`ps-deploy-btn ${affordable ? '' : 'ps-deploy-off'}`}
+      className={`ps-quick-btn ${affordable ? '' : 'ps-deploy-off'}`}
       onClick={() => gameRef.current?.queueBattalion(b.id)}
-      title={b.desc}
+      title={`${b.name} — ${b.role} · INK ${b.cost}`}
       disabled={!affordable}
     >
-      <span className="flex items-baseline justify-between gap-1.5 min-w-0">
-        <span className="font-mono text-[9px] tracking-[0.06em] text-[#d9d6cc] truncate">{b.name}</span>
-        <span className={`font-mono text-[9.5px] tabular-nums shrink-0 ${ink >= b.cost ? 'text-[#f3f1ea]' : 'text-[#6b655a]'}`}>
-          {b.cost}
-        </span>
+      <span className="ps-quick-glyph shrink-0">
+        <UnitGlyph type={b.type} w={34} h={19} skin="panel" />
       </span>
-      <span className="flex items-center gap-1 mt-[3px] min-w-0">
-        <span className="flex gap-[2px] min-w-0 overflow-hidden">
-          {b.kinds.slice(0, 4).map((k, i) => (
-            <span key={i} className="ps-kind-chip" data-k={k}>
-              {k}
-            </span>
-          ))}
-        </span>
+      <span className="flex flex-col items-start min-w-0 flex-1">
+        <span className="font-mono text-[9px] tracking-[0.05em] text-[#d9d6cc] truncate leading-[1.25]">{b.short}</span>
+        <span className="font-mono text-[7px] tracking-[0.1em] text-[#5d584d] truncate leading-[1.2]">{b.role}</span>
+      </span>
+      <span className={`font-mono text-[10px] tabular-nums shrink-0 ${ink >= b.cost && !queueFull ? 'text-[#f3f1ea]' : 'text-[#6b655a]'}`}>
+        {b.cost}
       </span>
     </button>
   );

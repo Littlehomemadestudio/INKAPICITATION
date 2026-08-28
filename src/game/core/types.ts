@@ -2,9 +2,11 @@
 // PAPER STORM · shared types
 // ─────────────────────────────────────────────────────────────
 
+import type { RosterEntry } from '../entities/roster';
+
 export type Faction = 'FRIEND' | 'ENEMY';
 
-export type UnitKind = 'MBT' | 'IFV' | 'SPG' | 'REC' | 'AIR' | 'SPAA' | 'HQ' | 'FACTORY' | 'NAVAL';
+export type UnitKind = 'MBT' | 'IFV' | 'SPG' | 'REC' | 'INF' | 'AIR' | 'SPAA' | 'HQ' | 'FACTORY' | 'NAVAL';
 
 export type ProjectileKind =
   | 'SHELL'
@@ -38,7 +40,10 @@ export type UnitActivity =
   | 'PINNED'
   | 'UNDERWAY'
   | 'TORPEDO RUN'
-  | 'SINKING';
+  | 'SINKING'
+  | 'SEARCHING'
+  | 'TRACKING'
+  | 'EMPLACING';
 
 export type OrderType = 'MOVE' | 'ATTACK' | 'ATTACK_MOVE' | 'STOP' | 'HOLD' | 'FIRE_MISSION' | 'PATROL';
 
@@ -178,7 +183,9 @@ export interface HudSnapshot {
   incomeFactories: number;
   sectorsHeld: number;
   sectorsTotal: number;
-  battalions: (BattalionDef & { available: boolean })[];
+  battalions: (RosterEntry & { available: boolean })[];
+  /** the arsenal command console is open */
+  arsenalOpen: boolean;
   production: HudProductionLine[];
   factories: {
     id: string;
