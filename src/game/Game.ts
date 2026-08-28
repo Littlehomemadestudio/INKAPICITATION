@@ -16,9 +16,11 @@ import { InputSystem } from './systems/input';
 import { Renderer } from './render/renderer';
 import { buildScenario, ScenarioData, BRIEFING } from './world/scenario';
 import { InkEconomy, FRIEND_BATTALIONS } from './systems/economy';
+import { ObstacleSystem } from './systems/obstacles';
 import type { Unit, SimContext } from './entities/units';
 import type { HudSnapshot, HudUnitLine, LogEntry, AfterActionReport } from './core/types';
 import { RNG, clockString, clamp } from './core/math';
+import { coverFrom } from './systems/cover';
 
 export class Game {
   canvas: HTMLCanvasElement;
@@ -37,6 +39,7 @@ export class Game {
   input: InputSystem;
   renderer: Renderer;
   economy!: InkEconomy;
+  obstacles!: ObstacleSystem;
 
   units: Unit[] = [];
   objectives: ScenarioData['objectives'] = [];
@@ -76,6 +79,7 @@ export class Game {
     this.effects = new EffectsSystem(this.seed, this.camera, this.audio, this.terrain.W, this.terrain.H);
     this.projectiles = new ProjectileSystem();
     this.vision = new VisionSystem(this.seed);
+    this.obstacles = new ObstacleSystem(this.terrain);
     this.input = new InputSystem(this, this.camera, canvas);
     this.renderer = new Renderer();
     this.renderer.initFonts();
@@ -89,6 +93,7 @@ export class Game {
       projectiles: this.projectiles,
       audio: this.audio,
       economy: this.economy,
+      obstacles: this.obstacles,
       time: this.time,
       rng: new RNG(this.seed ^ 0xbeef),
       log: (text, level) => this.log(text, level),
@@ -133,6 +138,7 @@ export class Game {
       projectiles: this.projectiles,
       audio: this.audio,
       economy: this.economy,
+      obstacles: this.obstacles,
       time: 0,
       rng: new RNG(this.seed ^ 0xbeef),
       log: (text: string, level?: 'info' | 'contact' | 'alert' | 'objective' | 'economy') => this.log(text, level),
@@ -164,6 +170,7 @@ export class Game {
     this.terrainRenderer = new TerrainRenderer(this.terrain);
     this.effects = new EffectsSystem(this.seed, this.camera, this.audio, this.terrain.W, this.terrain.H);
     this.projectiles = new ProjectileSystem();
+    this.obstacles = new ObstacleSystem(this.terrain);
     this.loadScenario();
     this.input = new InputSystem(this, this.camera, this.canvas);
     this.simCtxCache = {
@@ -173,6 +180,7 @@ export class Game {
       projectiles: this.projectiles,
       audio: this.audio,
       economy: this.economy,
+      obstacles: this.obstacles,
       time: 0,
       rng: new RNG(this.seed ^ 0xbeef),
       log: (text, level) => this.log(text, level),
@@ -451,6 +459,47 @@ export class Game {
     const enemyStrength = this.units.filter(
       (u) => u.faction === 'ENEMY' && !u.dead && !u.isAir && u.def.kind !== 'HQ' && u.def.kind !== 'FACTORY'
     ).length;
+    // cover state of the detailed unit — against its last attacker,
+    // else the nearest known contact
+    let coverLabel = 'EXPOSED';
+    if (detailUnit && !detailUnit.isAir) {
+      let tx = 0;
+      let ty = 0;
+      let td = Infinity;
+      if (detailUnit.lastAttacker && !detailUnit.lastAttacker.dead && this.time - detailUnit.lastAttackedT < 20) {
+        tx = detailUnit.lastAttacker.x;
+        ty = detailUnit.lastAttacker.y;
+        td = 0;
+      } else {
+        for (const e of this.units) {
+          if (e.dead || e.faction !== 'ENEMY' || e.isAir) continue;
+          if (e.intel === 'HIDDEN' && e.def.kind !== 'FACTORY') continue;
+          const d = Math.hypot(e.x - detailUnit.x, e.y - detailUnit.y);
+          if (d < td && d < 1500) {
+            td = d;
+            tx = e.x;
+            ty = e.y;
+          }
+        }
+      }
+      if (td < Infinity) {
+        const cov = coverFrom(this.simCtx(), detailUnit.x, detailUnit.y, tx, ty);
+        coverLabel =
+          cov.type === 'TRENCH'
+            ? 'DUG IN'
+            : cov.value >= 0.6
+              ? 'HARD COVER'
+              : cov.value >= 0.42
+                ? 'GOOD COVER'
+                : cov.value >= 0.28
+                  ? 'LIGHT COVER'
+                  : cov.type === 'TERRAIN'
+                    ? 'HULL DEFILE'
+                    : 'EXPOSED';
+      } else {
+        coverLabel = '—';
+      }
+    }
     return {
       running: this.running,
       paused: this.paused,
@@ -482,6 +531,7 @@ export class Game {
             vision: detailUnit.def.vision,
             armor: detailUnit.def.kind === 'MBT' ? 'HEAVY' : detailUnit.def.kind === 'IFV' ? 'MEDIUM' : 'LIGHT',
             suppression: Math.round(detailUnit.suppression * 100),
+            cover: coverLabel,
           }
         : null,
       log: this.logEntries.slice(0, 8),

@@ -409,6 +409,25 @@ export class ProjectileSystem {
     }
     // damage
     this.applyDamage(p, ctx, p.x, p.y);
+    // the world takes the hit too — timber, stone, concrete, roofs
+    if (ctx.obstacles) {
+      switch (p.kind) {
+        case 'SHELL':
+          ctx.obstacles.damageAt(ctx, p.x, p.y, 9, p.damage * 2.0, p.kind);
+          break;
+        case 'AUTO':
+          ctx.obstacles.damageAt(ctx, p.x, p.y, 2.5, 5, p.kind);
+          break;
+        case 'ARTY':
+          ctx.obstacles.damageAt(ctx, p.x, p.y, Math.max(20, p.splash), p.damage * 1.7, p.kind);
+          break;
+        case 'MISSILE_AIR':
+          ctx.obstacles.damageAt(ctx, p.x, p.y, Math.max(10, p.splash * 0.7), p.damage * 2.2, p.kind);
+          break;
+        default:
+          break;
+      }
+    }
   }
 
   private applyDamage(p: Projectile, ctx: SimContext, x: number, y: number) {

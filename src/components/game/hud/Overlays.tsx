@@ -326,6 +326,14 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
             speed degrade until the fire lifts. Artillery scatters: observed targets are hammered, blind fire wastes
             shells, and anything moving can slip the bracket. Attack aircraft strike in committed passes, then egress.
           </p>
+          <p className="text-[11.5px] leading-relaxed text-[#4c473d] col-span-2">
+            The battlefield is matter. Trees have trunks — tanks crush them flat, guns splinter them, light vehicles
+            must steer between them. Boulders and buildings stop movement dead, and shells break what stands: walls
+            breach stone by stone, roofs cave in, collapsed structures open new sightlines and leave rubble that still
+            hides a hull. A selected unit in cover carries three ticks on its sheltered side. Crews under fire dive for
+            the nearest solid cover — the right side of it, facing the shooter — and resume their mission when the fire
+            slackens. Order an assault and they push through instead.
+          </p>
         </div>
         <div className="font-mono text-[9px] tracking-[0.24em] text-[#6b6557] mb-2 border-b border-[#ddd9cd] pb-1">
           THE INK LEDGER

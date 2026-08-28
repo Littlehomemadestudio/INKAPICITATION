@@ -10,6 +10,7 @@ import type { Unit } from '../entities/units';
 import type { Game } from '../Game';
 import { drawVehicle, drawSelectionBrackets, FRIEND_STYLE, ENEMY_STYLE, WRECK_STYLE } from '../entities/unitDraw';
 import { clamp } from '../core/math';
+import { coverFrom } from '../systems/cover';
 import type { ObjectiveState, Sector } from '../core/types';
 
 interface HoverLabel {
@@ -412,6 +413,33 @@ export class Renderer {
 
   // ── units ──────────────────────────────────────────────────
 
+  /** cover state of a friendly unit vs the nearest known threat */
+  private coverOf(u: Unit, game: Game, x: number, y: number): { value: number; type: string; threatX: number; threatY: number } | null {
+    // the shooter is the threat that matters; otherwise nearest contact
+    let tx = 0;
+    let ty = 0;
+    let td = Infinity;
+    if (u.lastAttacker && !u.lastAttacker.dead && game.time - u.lastAttackedT < 20) {
+      tx = u.lastAttacker.x;
+      ty = u.lastAttacker.y;
+      td = 0;
+    } else {
+      for (const e of game.units) {
+        if (e.dead || e.faction !== 'ENEMY' || e.isAir) continue;
+        if (e.intel === 'HIDDEN' && e.def.kind !== 'FACTORY') continue;
+        const d = Math.hypot(e.x - x, e.y - y);
+        if (d < td && d < 1500) {
+          td = d;
+          tx = e.x;
+          ty = e.y;
+        }
+      }
+    }
+    if (td === Infinity) return null;
+    const r = coverFrom(game.simCtx(), x, y, tx, ty);
+    return { value: r.value, type: r.type, threatX: tx, threatY: ty };
+  }
+
   private drawUnits(ctx: CanvasRenderingContext2D, game: Game, cam: Camera, hovers: HoverLabel[]) {
     const zoom = cam.zoom;
     const detail = zoom < 0.28 ? 0 : zoom < 0.85 ? 1 : 2;
@@ -520,6 +548,45 @@ export class Renderer {
         ctx.save();
         ctx.translate(gx, gy);
         drawSelectionBrackets(ctx, u.def.length * 0.62 * Math.max(es, 1), 7 / zoom, Math.max(1.2, 1.3 / zoom), '#141210');
+        // the cover mark — a bracketed arc on the sheltered side, so the
+        // player can read WHY this vehicle is alive over the open field
+        const cov = this.coverOf(u, game, gx, gy);
+        if (cov && cov.value >= 0.34) {
+          const threatA = Math.atan2(cov.threatY - gy, cov.threatX - gx);
+          const ca = threatA + Math.PI; // the protected side
+          const rr = u.def.length * 0.62 * Math.max(es, 1) + 8 / zoom;
+          const tick = Math.max(4.5, 6.5 / zoom);
+          ctx.save();
+          ctx.rotate(ca);
+          // paper backing so the mark survives craters and smoke
+          ctx.fillStyle = 'rgba(243,241,234,0.75)';
+          ctx.beginPath();
+          ctx.arc(0, 0, rr + tick * 0.9, -Math.PI / 2.4, Math.PI / 2.4);
+          ctx.arc(0, 0, rr - tick * 0.6, Math.PI / 2.4, -Math.PI / 2.4, true);
+          ctx.closePath();
+          ctx.fill();
+          // the arc itself
+          ctx.strokeStyle = '#141210';
+          ctx.lineWidth = Math.max(1.8, 2.4 / zoom);
+          ctx.lineCap = 'butt';
+          ctx.beginPath();
+          ctx.arc(0, 0, rr, -Math.PI / 2.6, Math.PI / 2.6);
+          ctx.stroke();
+          // three ticks pointing into the cover
+          for (let i = -1; i <= 1; i++) {
+            const ta = i * 0.38;
+            const ax = Math.cos(ta) * rr;
+            const ay = Math.sin(ta) * rr;
+            const nx = Math.cos(ta);
+            const ny = Math.sin(ta);
+            ctx.beginPath();
+            ctx.moveTo(ax - ny * tick * 0.34, ay + nx * tick * 0.34);
+            ctx.lineTo(ax + nx * tick * 0.66, ay + ny * tick * 0.66);
+            ctx.lineTo(ax + ny * tick * 0.34, ay - nx * tick * 0.34);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
         // command path
         if (u.dest) {
           ctx.strokeStyle = 'rgba(20,17,12,0.5)';
@@ -555,6 +622,18 @@ export class Renderer {
       if (game.input.hoverUnit === u) {
         const s = cam.worldToScreen(gx, gy);
         if (u.faction === 'FRIEND') {
+          const cov = this.coverOf(u, game, gx, gy);
+          const coverLine = !cov
+            ? ''
+            : cov.value >= 0.65
+              ? 'DUG IN'
+              : cov.value >= 0.45
+                ? 'HARD COVER'
+                : cov.value >= 0.34
+                  ? 'IN COVER'
+                  : cov.type === 'TERRAIN'
+                    ? 'DEFILE'
+                    : 'EXPOSED';
           hovers.push({
             sx: s.x,
             sy: s.y,
@@ -562,7 +641,8 @@ export class Renderer {
             lines: [
               `${u.callsign} · ${u.def.shortName}`,
               u.pinned ? 'PINNED DOWN' : u.suppression > 0.5 ? 'SUPPRESSED' : u.getActivity(),
-              `GRID ${u.positionGrid()}`,
+              coverLine || `GRID ${u.positionGrid()}`,
+              ...(coverLine ? [`GRID ${u.positionGrid()}`] : []),
             ],
           });
         } else {

@@ -310,13 +310,83 @@
   border-color: #5d584d;
 }
 
-/* graceful degradation on narrow viewports (desktop RTS first) */
-@media (max-width: 1280px) {
+/* ── responsive command architecture ──────────────────────────
+   The instrument adapts; the battlefield never shrinks.
+   Tested at 1366×768 · 1440×900 · 1920×1080.                */
+
+/* horizontal scroll safety net for the bottom bar */
+.ps-scroll-x {
+  scrollbar-width: thin;
+}
+.ps-scroll-x::-webkit-scrollbar {
+  height: 4px;
+}
+.ps-scroll-x::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ps-scroll-x::-webkit-scrollbar-thumb {
+  background: #3a352c;
+}
+
+/* panel widths — one source of truth, three breakpoints */
+.ps-panel-map    { width: var(--ps-w-map); }
+.ps-panel-form   { width: var(--ps-w-form); }
+.ps-panel-deploy { width: var(--ps-w-deploy); }
+.ps-panel-air    { width: var(--ps-w-air); }
+.ps-panel-log    { width: var(--ps-w-log); }
+
+:root {
+  --ps-w-map: 210px;
+  --ps-w-form: 330px;
+  --ps-w-deploy: 318px;
+  --ps-w-air: 196px;
+  --ps-w-log: 280px;
+}
+
+/* ≤1500px — compact instruments, everything still readable */
+@media (max-width: 1500px) {
+  :root {
+    --ps-w-map: 184px;
+    --ps-w-form: 300px;
+    --ps-w-deploy: 292px;
+    --ps-w-air: 182px;
+    --ps-w-log: 230px;
+  }
+  .ps-subtle { display: none; }
+  .ps-top-cell { padding-left: 0.6rem; padding-right: 0.6rem; }
+}
+
+/* ≤1380px — secondary info collapses first (comms traffic) */
+@media (max-width: 1380px) {
+  :root {
+    --ps-w-map: 176px;
+    --ps-w-form: 286px;
+    --ps-w-deploy: 282px;
+    --ps-w-air: 176px;
+  }
+  .ps-log-panel { display: none; }
+  /* objective chips: primary only, rest summarised */
+  .ps-obj-extra { display: none; }
+  .ps-controls { gap: 0.25rem; }
+  .ps-controls .ps-btn { padding: 3px 6px; }
+}
+
+/* ≤1180px — air ops folds into the log's slot */
+@media (max-width: 1180px) {
+  :root {
+    --ps-w-map: 170px;
+    --ps-w-form: 272px;
+    --ps-w-deploy: 272px;
+  }
   .ps-air-panel { display: none; }
 }
+
+/* legacy narrow-viewport graceful degradation */
 @media (max-width: 1000px) {
-  .ps-log-panel { display: none; }
-}
-@media (max-width: 820px) {
   .ps-selection-panel { display: none; }
+}
+
+/* short viewports: the sheet, not the chrome, keeps priority */
+@media (max-height: 800px) {
+  .ps-detail-left { width: 168px; }
 }

@@ -382,7 +382,8 @@ export class TerrainRenderer {
     }
   }
 
-  /** dry stone walls — cover you can read at a glance */
+  /** dry stone walls — cover you can read at a glance. Breached
+   *  sections collapse into a scatter of pale rubble stones. */
   private drawWalls(ctx: CanvasRenderingContext2D, cam: Camera) {
     const t = this.terrain;
     const thick = Math.max(1.8, 2.2 / Math.sqrt(cam.zoom));
@@ -392,25 +393,47 @@ export class TerrainRenderer {
       ctx.save();
       ctx.translate(w.x, w.y);
       ctx.rotate(w.rot);
-      // shadow
-      ctx.fillStyle = 'rgba(30,27,20,0.16)';
-      ctx.fillRect(-w.len / 2 + 2, -thick / 2 + 2.4, w.len, thick);
-      // stone body
-      ctx.fillStyle = '#a8a294';
-      ctx.fillRect(-w.len / 2, -thick / 2, w.len, thick);
-      // cap stones
-      ctx.fillStyle = '#c0baa9';
-      const n = Math.max(3, Math.round(w.len / 9));
+      const segs = w.segs ?? [];
+      const n = segs.length || Math.max(3, Math.round(w.len / 9));
+      const segLen = w.len / n;
       for (let i = 0; i < n; i++) {
-        const x = -w.len / 2 + (i * w.len) / n + 1;
-        ctx.fillRect(x, -thick / 2 + 0.4, w.len / n - 2, thick * 0.4);
-      }
-      // copestones — the give-away profile of a field wall
-      if (cam.zoom > 0.7) {
-        ctx.fillStyle = '#8f897b';
-        for (let i = 0; i < n; i += 2) {
-          const x = -w.len / 2 + (i * w.len) / n + 1;
-          ctx.fillRect(x + 1, -thick / 2 - 0.9, w.len / n - 3, 1.1);
+        const lx = -w.len / 2 + segLen * (i + 0.5);
+        const alive = !segs.length || segs[i].hp > 0;
+        if (alive) {
+          // shadow
+          ctx.fillStyle = 'rgba(30,27,20,0.16)';
+          ctx.fillRect(lx - segLen / 2 + 2, -thick / 2 + 2.4, segLen, thick);
+          // stone body
+          ctx.fillStyle = '#a8a294';
+          ctx.fillRect(lx - segLen / 2, -thick / 2, segLen, thick);
+          // cap stones
+          ctx.fillStyle = '#c0baa9';
+          const cn = Math.max(1, Math.round(segLen / 9));
+          for (let c = 0; c < cn; c++) {
+            const cx = lx - segLen / 2 + (c * segLen) / cn + 1;
+            ctx.fillRect(cx, -thick / 2 + 0.4, segLen / cn - 2, thick * 0.4);
+          }
+          // copestones — the give-away profile of a field wall
+          if (cam.zoom > 0.7) {
+            ctx.fillStyle = '#8f897b';
+            for (let c = 0; c < cn; c += 2) {
+              const cx = lx - segLen / 2 + (c * segLen) / cn + 1;
+              ctx.fillRect(cx + 1, -thick / 2 - 0.9, segLen / cn - 3, 1.1);
+            }
+          }
+        } else if (cam.zoom > 0.45) {
+          // a breach — stones tumbled and scattered
+          const seedR = ((w.x * 13 + i * 7) % 97) / 97;
+          for (let c = 0; c < 4; c++) {
+            const a = seedR * Math.PI * 2 + c * 1.9;
+            const rr = 1.2 + (c % 2) * 1.6;
+            const px = lx + Math.cos(a) * (segLen * 0.3);
+            const py = Math.sin(a) * 3.4;
+            ctx.fillStyle = c % 2 ? 'rgba(150,144,130,0.8)' : 'rgba(120,114,100,0.7)';
+            ctx.beginPath();
+            ctx.ellipse(px, py, rr, rr * 0.7, a, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
       ctx.restore();
@@ -429,6 +452,20 @@ export class TerrainRenderer {
       return;
     }
     for (const b of t.barriers) {
+      const hp = b.hp ?? 100;
+      if (hp <= 0) {
+        // shattered concrete — a flattened stub that no longer blocks
+        if (cam.zoom > 0.5) {
+          ctx.fillStyle = 'rgba(120,114,100,0.55)';
+          ctx.beginPath();
+          ctx.ellipse(b.x, b.y, 4.6, 3.4, b.rot, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(90,85,74,0.4)';
+          ctx.lineWidth = 0.7;
+          ctx.stroke();
+        }
+        continue;
+      }
       if (b.x < cam.viewX - 30 || b.x > cam.viewX + cam.viewW + 30) continue;
       if (b.y < cam.viewY - 30 || b.y > cam.viewY + cam.viewH + 30) continue;
       ctx.save();
@@ -440,7 +477,8 @@ export class TerrainRenderer {
       ctx.fill();
       ctx.rotate(b.rot);
       // pyramidal block seen from above: a square with an X brace
-      ctx.fillStyle = '#b5af9f';
+      const chipped = hp < 60;
+      ctx.fillStyle = chipped ? '#a49e8e' : '#b5af9f';
       ctx.strokeStyle = '#57523f';
       ctx.lineWidth = Math.max(0.7, 0.8 / cam.zoom);
       ctx.beginPath();
@@ -457,6 +495,16 @@ export class TerrainRenderer {
       ctx.moveTo(4, -3);
       ctx.lineTo(-4, 3);
       ctx.stroke();
+      if (chipped && cam.zoom > 0.7) {
+        // spall cracks from near-misses
+        ctx.strokeStyle = 'rgba(70,66,55,0.6)';
+        ctx.lineWidth = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(-2.4, -1.4);
+        ctx.lineTo(0.6, 0.8);
+        ctx.lineTo(-0.8, 2.6);
+        ctx.stroke();
+      }
       // apex mark
       ctx.fillStyle = '#8f897b';
       ctx.beginPath();
@@ -709,13 +757,15 @@ export class TerrainRenderer {
     const vy1 = cam ? cam.viewY + cam.viewH + 60 : Infinity;
     for (const b of this.terrain.buildings) {
       if (b.x < vx0 || b.x > vx1 || b.y < vy0 || b.y > vy1) continue;
+      const stage = b.stage ?? 0;
+      if (stage >= 3) continue; // collapsed — the rubble field draws in its place
       ctx.save();
       ctx.translate(b.x, b.y);
       ctx.rotate(b.rot);
       // shadow
       ctx.fillStyle = 'rgba(30,27,20,0.13)';
       ctx.fillRect(-b.w / 2 + 3.4, -b.h / 2 + 4.2, b.w, b.h);
-      // body
+      // body — fire and blast darken the walls before they fall
       let fill = '#e6e3d8';
       if (b.kind === 'HQ_CORE') fill = '#dcd8ca';
       if (b.kind === 'BUNKER') fill = '#c9c4b5';
@@ -723,11 +773,50 @@ export class TerrainRenderer {
       if (b.kind === 'FACTORY_HALL') fill = '#d9d4c4';
       if (b.kind === 'FACTORY_HALL2') fill = '#ddd8c9';
       if (b.kind === 'DEPOT') fill = '#dcd7c8';
+      if (stage === 1) fill = shade(fill, -0.1);
+      if (stage === 2) fill = shade(fill, -0.24);
       ctx.fillStyle = fill;
       ctx.fillRect(-b.w / 2, -b.h / 2, b.w, b.h);
       ctx.strokeStyle = b.kind === 'HQ_CORE' || b.kind.startsWith('FACTORY') ? '#2b2820' : '#524d42';
       ctx.lineWidth = b.kind === 'HQ_CORE' || b.kind.startsWith('FACTORY') ? 2 : 1.3;
       ctx.strokeRect(-b.w / 2, -b.h / 2, b.w, b.h);
+
+      // battle damage — soot, shell holes, a broken roofline
+      if (stage >= 1 && b.kind !== 'MAST') {
+        const seed = ((b.x * 31 + b.y * 17) % 89) / 89;
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        // soot smears
+        ctx.fillStyle = 'rgba(52,48,40,0.4)';
+        for (let i = 0; i < 3; i++) {
+          const sx = -b.w / 2 + b.w * ((seed * 3 + i * 0.37) % 1);
+          const sy = -b.h / 2 + b.h * ((seed * 7 + i * 0.53) % 1);
+          ctx.beginPath();
+          ctx.ellipse(sx, sy, Math.min(b.w, b.h) * 0.16, Math.min(b.w, b.h) * 0.1, seed + i, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+        if (stage >= 2 && zoom > 0.5) {
+          // shell holes punched through the roof
+          ctx.fillStyle = 'rgba(28,25,19,0.72)';
+          const holes = 2 + Math.round(seed * 3);
+          for (let i = 0; i < holes; i++) {
+            const hx = -b.w / 2 + b.w * ((seed * 11 + i * 0.41) % 1);
+            const hy = -b.h / 2 + b.h * ((seed * 5 + i * 0.67) % 1);
+            ctx.beginPath();
+            ctx.ellipse(hx, hy, Math.min(3.4, b.w * 0.12), Math.min(2.6, b.h * 0.12), seed * 3 + i, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          // a broken edge — the outline no longer closes
+          ctx.strokeStyle = 'rgba(60,56,46,0.8)';
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          const ex = -b.w / 2 + b.w * (((seed * 13) % 0.7) + 0.1);
+          ctx.moveTo(ex, -b.h / 2);
+          ctx.lineTo(ex + b.w * 0.08, b.h / 2);
+          ctx.stroke();
+        }
+      }
 
       if (b.kind === 'MAST') {
         // communications mast: lattice triangle + guy wires
@@ -1011,10 +1100,11 @@ export class TerrainRenderer {
     const cap = 1600;
 
     if (!detail) {
-      // far view: solid ink dots
+      // far view: solid ink dots (fallen timber no longer reads as mass)
       ctx.fillStyle = 'rgba(78,73,62,0.85)';
       for (const tr of trees) {
         if (tr.x < x0 || tr.x > x1 || tr.y < y0 || tr.y > y1) continue;
+        if ((tr.state ?? 0) !== 0) continue;
         if (drawn++ > cap) break;
         ctx.beginPath();
         ctx.arc(tr.x, tr.y, tr.r, 0, Math.PI * 2);
@@ -1030,9 +1120,52 @@ export class TerrainRenderer {
     }
   }
 
-  /** one tree — small local paths rasterize far faster than one giant path */
+  /** one tree — small local paths rasterize far faster than one giant path.
+   *  A felled trunk lies where it fell; a splintered stump remembers the shell. */
   private drawTree(ctx: CanvasRenderingContext2D, tr: TreePoint, zoom: number) {
     const r = tr.r;
+    const state = tr.state ?? 0;
+    if (state === 1) {
+      // felled — a prone trunk with a shrunken canopy at its tip
+      const dir = tr.fallDir ?? 0;
+      const len = r * 2.4;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(58,54,44,0.85)';
+      ctx.lineWidth = Math.max(1.4, 1.8 / Math.sqrt(zoom));
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(tr.x, tr.y);
+      ctx.lineTo(tr.x + Math.cos(dir) * len, tr.y + Math.sin(dir) * len);
+      ctx.stroke();
+      if (zoom > 0.85) {
+        ctx.fillStyle = 'rgba(66,61,51,0.55)';
+        ctx.beginPath();
+        ctx.ellipse(tr.x + Math.cos(dir) * len, tr.y + Math.sin(dir) * len, r * 0.5, r * 0.36, dir, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+    if (state === 2) {
+      // splintered stump — artillery was here
+      ctx.fillStyle = 'rgba(70,66,55,0.9)';
+      ctx.beginPath();
+      ctx.arc(tr.x, tr.y, Math.max(1.1, r * 0.22), 0, Math.PI * 2);
+      ctx.fill();
+      if (zoom > 0.85) {
+        const dir = tr.fallDir ?? 0;
+        ctx.strokeStyle = 'rgba(60,56,46,0.5)';
+        ctx.lineWidth = 0.7;
+        ctx.beginPath();
+        for (let i = -1; i <= 1; i++) {
+          const a = dir + i * 0.5;
+          ctx.moveTo(tr.x, tr.y);
+          ctx.lineTo(tr.x + Math.cos(a) * r * 0.55, tr.y + Math.sin(a) * r * 0.55);
+        }
+        ctx.stroke();
+      }
+      return;
+    }
     const seed = tr.seed * Math.PI * 2;
     const blob = (cx: number, cy: number, rad: number, fill: string) => {
       ctx.fillStyle = fill;
@@ -1252,4 +1385,13 @@ export class TerrainRenderer {
     }
     ctx.restore();
   }
+}
+
+/** darken a #rrggbb colour by k (-1..1) — blast grime on walls */
+function shade(hex: string, k: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = Math.max(0, Math.min(255, ((n >> 16) & 255) * (1 + k)));
+  const g = Math.max(0, Math.min(255, ((n >> 8) & 255) * (1 + k)));
+  const b = Math.max(0, Math.min(255, (n & 255) * (1 + k)));
+  return `rgb(${r | 0},${g | 0},${b | 0})`;
 }

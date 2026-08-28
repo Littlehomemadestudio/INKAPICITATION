@@ -7,6 +7,7 @@ import { Unit } from '../entities/units';
 import type { Camera } from './camera';
 import type { Game } from '../Game';
 import { dist, clamp } from '../core/math';
+import { refineCover } from './cover';
 
 export type CursorMode = 'NORMAL' | 'ATTACK_MOVE' | 'FIRE_MISSION';
 
@@ -335,10 +336,24 @@ export class InputSystem {
     }
   }
 
-  /** spread a group into marching formation offsets */
+  /** spread a group into marching formation offsets — and when the
+   *  destination is contested ground, settle each vehicle behind
+   *  the nearest useful cover rather than the open field beside it */
   private formationMove(units: Unit[], dest: { x: number; y: number }, attackMove = false) {
     const ang = Math.atan2(dest.y - units[0].y, dest.x - units[0].x);
     const perp = ang + Math.PI / 2;
+    // the nearest known threat to the destination drives cover choices
+    let threat: { x: number; y: number } | null = null;
+    let td = 1100;
+    for (const e of this.game.units) {
+      if (e.faction !== 'ENEMY' || e.dead || e.isAir) continue;
+      if (e.intel === 'HIDDEN' && e.def.kind !== 'FACTORY') continue;
+      const d = dist(e.x, e.y, dest.x, dest.y);
+      if (d < td) {
+        td = d;
+        threat = { x: e.x, y: e.y };
+      }
+    }
     // spacing by role: armour fights at arm's length
     const spacingFor = (u: Unit) =>
       u.def.kind === 'MBT' ? 78 : u.def.kind === 'IFV' ? 62 : u.def.kind === 'SPG' ? 84 : 54;
@@ -349,8 +364,13 @@ export class InputSystem {
       const spacing = spacingFor(u);
       const ox = (col - (cols - 1) / 2) * spacing;
       const oy = (row - (Math.ceil(units.length / cols) - 1) / 2) * spacing * 1.3;
-      const px = dest.x + Math.cos(perp) * ox - Math.cos(ang) * oy;
-      const py = dest.y + Math.sin(perp) * ox - Math.sin(ang) * oy;
+      let px = dest.x + Math.cos(perp) * ox - Math.cos(ang) * oy;
+      let py = dest.y + Math.sin(perp) * ox - Math.sin(ang) * oy;
+      if (threat && u.def.kind !== 'SPG') {
+        const refined = refineCover(this.game.simCtx(), { x: px, y: py }, threat, 36);
+        px = refined.x;
+        py = refined.y;
+      }
       if (attackMove) u.orderAttackMove({ x: px, y: py }, this.game.simCtx());
       else u.orderMove({ x: px, y: py }, this.game.simCtx());
     });

@@ -26,17 +26,17 @@ export function TopBar({ hud, soundOn, onToggleSound, onHelp, onSpeed, onPause }
   const sectorsHeld = hud?.sectorsHeld ?? 0;
   const sectorsTotal = hud?.sectorsTotal ?? 7;
   return (
-    <div className="absolute top-0 inset-x-0 h-10 bg-[#12110e] border-b border-[#36322a] flex items-stretch">
+    <div className="ps-topbar absolute top-0 inset-x-0 h-10 bg-[#12110e] border-b border-[#36322a] flex items-stretch">
       {/* wordmark */}
-      <div className="flex items-center gap-3 px-4 border-r border-[#242119]">
+      <div className="ps-top-cell flex items-center gap-3 px-4 border-r border-[#242119]">
         <span className="text-[13px] font-bold tracking-[0.34em] text-[#f3f1ea]">PAPER STORM</span>
-        <span className="font-mono text-[9px] tracking-[0.2em] text-[#5d584d] pt-px">OPERATION CROSSWIND</span>
+        <span className="ps-subtle font-mono text-[9px] tracking-[0.2em] text-[#5d584d] pt-px">OPERATION CROSSWIND</span>
       </div>
 
       {/* clock + phase */}
-      <div className="flex items-center gap-3 px-4 border-r border-[#242119]">
+      <div className="ps-top-cell flex items-center gap-3 px-4 border-r border-[#242119]">
         <span className="font-mono text-[11px] text-[#d9d6cc]">T+{fmtClock(hud?.missionTime ?? 0)}</span>
-        <span className="font-mono text-[9px] tracking-[0.18em] text-[#5d584d]">
+        <span className="ps-subtle font-mono text-[9px] tracking-[0.18em] text-[#5d584d]">
           {hud?.result === 'VICTORY' ? 'COMPLETE' : hud?.result === 'DEFEAT' ? 'FAILED' : hud?.paused ? 'PAUSED' : 'EXECUTING'}
         </span>
       </div>
@@ -62,11 +62,11 @@ export function TopBar({ hud, soundOn, onToggleSound, onHelp, onSpeed, onPause }
       </div>
 
       {/* objectives */}
-      <div className="flex-1 flex items-center gap-2 px-4 overflow-hidden">
-        {(hud?.objectives ?? []).map((o) => (
+      <div className="ps-top-cell ps-obj-row flex-1 flex items-center gap-2 px-4 overflow-hidden">
+        {(hud?.objectives ?? []).map((o, i) => (
           <div
             key={o.id}
-            className={`font-mono text-[9px] tracking-[0.14em] px-2 py-1 border ${
+            className={`ps-obj-chip ${i > 0 ? 'ps-obj-extra' : ''} font-mono text-[9px] tracking-[0.14em] px-2 py-1 border ${
               o.status === 'SECURED'
                 ? 'bg-[#f3f1ea] text-[#12110e] border-[#f3f1ea]'
                 : 'text-[#8d887b] border-[#36322a]'
@@ -81,7 +81,7 @@ export function TopBar({ hud, soundOn, onToggleSound, onHelp, onSpeed, onPause }
       </div>
 
       {/* sim controls */}
-      <div className="flex items-center gap-1.5 px-3 border-l border-[#242119]">
+      <div className="ps-top-cell ps-controls flex items-center gap-1.5 px-3 border-l border-[#242119]">
         <button className="ps-btn" onClick={onPause} title="Space">
           {hud?.paused ? 'RESUME' : 'PAUSE'}
         </button>
@@ -129,19 +129,19 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
   };
 
   return (
-    <div className="absolute bottom-0 inset-x-0 h-[150px] bg-[#12110e] border-t border-[#36322a] flex items-stretch gap-0">
+    <div className="ps-bottombar absolute bottom-0 inset-x-0 h-[150px] bg-[#12110e] border-t border-[#36322a] flex items-stretch gap-0 overflow-x-auto ps-scroll-x">
       {/* minimap */}
-      <div className="ps-panel border-t-0 border-l-0 border-b-0 border-r w-[210px] flex flex-col">
+      <div className="ps-panel ps-panel-map border-t-0 border-l-0 border-b-0 border-r flex flex-col shrink-0">
         <div className="ps-header">
           <span>MAP · 1:10 000</span>
           <span className="text-[#8d887b]">3368-IV</span>
         </div>
-        <div className="relative flex-1 p-2">
+        <div className="relative flex-1 p-2 min-h-0">
           <canvas
             ref={minimapRef}
             width={194}
             height={112}
-            className="cursor-crosshair"
+            className="ps-minimap cursor-crosshair w-full h-auto"
             onMouseDown={onMinimapClick}
           />
           <div className="absolute top-3 right-3 font-mono text-[8px] text-[#5d584d] tracking-widest">N ↑</div>
@@ -149,13 +149,13 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* selection / formation */}
-      <div className="ps-panel ps-selection-panel border-t-0 border-b-0 border-r w-[330px] flex flex-col">
+      <div className="ps-panel ps-selection-panel ps-panel-form border-t-0 border-b-0 border-r flex flex-col shrink-0">
         <div className="ps-header">
           <span>FORMATION</span>
           <span>{hud?.selectionCount ? `${hud.selectionCount} UNIT(S)` : 'NO SELECTION'}</span>
         </div>
         <SelectionBody hud={hud} />
-        <div className="flex gap-1.5 px-2 py-1.5 border-t border-[#242119]">
+        <div className="ps-cmd-row flex gap-1.5 px-2 py-1.5 border-t border-[#242119]">
           <button
             className="ps-btn"
             disabled={!hud?.selectionCount}
@@ -188,7 +188,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* deployment — the ink becomes force */}
-      <div className="ps-panel border-t-0 border-b-0 border-r w-[318px] flex flex-col">
+      <div className="ps-panel ps-panel-deploy border-t-0 border-b-0 border-r flex flex-col shrink-0">
         <div className="ps-header">
           <span>DEPLOY · ASSEMBLY ALPHA</span>
           <span className="text-[#8d887b]">{hud?.ink ?? 0} INK</span>
@@ -197,7 +197,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* unit detail */}
-      <div className="ps-panel border-t-0 border-b-0 border-r flex-1 min-w-0 flex flex-col">
+      <div className="ps-panel ps-panel-detail border-t-0 border-b-0 border-r flex-1 min-w-0 flex flex-col">
         <div className="ps-header">
           <span>UNIT DETAIL</span>
           <span>{hud?.detailUnit ? hud.detailUnit.callsign : '—'}</span>
@@ -206,7 +206,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* air operations */}
-      <div className="ps-panel ps-air-panel border-t-0 border-b-0 border-r w-[196px] flex flex-col">
+      <div className="ps-panel ps-air-panel ps-panel-air border-t-0 border-b-0 border-r flex flex-col shrink-0">
         <div className="ps-header">
           <span>AIR OPS</span>
           <span>CAS</span>
@@ -257,7 +257,7 @@ export function BottomBar({ hud, minimapRef, gameRef }: BottomBarProps) {
       </div>
 
       {/* comms log */}
-      <div className="ps-panel ps-log-panel border-t-0 border-b-0 border-l-0 w-[280px] flex flex-col">
+      <div className="ps-panel ps-log-panel ps-panel-log border-t-0 border-b-0 border-l-0 flex flex-col shrink-0">
         <div className="ps-header">
           <span>COMMS · TRAFFIC</span>
           <span>REC</span>
@@ -410,11 +410,12 @@ function DetailBody({ hud }: { hud: HudSnapshot | null }) {
     ['SPEED', `${ex.speedKph} km/h`],
     ['VISION', `${ex.vision} m`],
     ['ARMOUR', ex.armor],
+    ['COVER', ex.cover],
   ];
   const sup = hud?.detailUnit?.suppression ?? 0;
   return (
     <div className="flex-1 min-h-0 flex">
-      <div className="w-[190px] border-r border-[#242119] p-2 flex flex-col gap-1">
+      <div className="ps-detail-left w-[190px] border-r border-[#242119] p-2 flex flex-col gap-1">
         <span className="font-mono text-[11px] text-[#f3f1ea]">{d.callsign}</span>
         <span className="font-mono text-[8.5px] text-[#8d887b] leading-snug">{d.typeName}</span>
         <div className="mt-auto flex flex-col gap-1">

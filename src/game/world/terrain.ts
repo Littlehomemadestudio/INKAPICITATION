@@ -13,6 +13,10 @@ export interface TreePoint {
   y: number;
   r: number;
   seed: number;
+  /** 0 standing · 1 felled · 2 splintered stump */
+  state?: number;
+  /** direction the timber fell */
+  fallDir?: number;
 }
 
 export type BuildingKind =
@@ -41,6 +45,11 @@ export interface Building {
   h: number;
   rot: number;
   kind: BuildingKind;
+  /** structural integrity */
+  hp?: number;
+  hpMax?: number;
+  /** 0 intact · 1 scarred · 2 wrecked · 3 collapsed */
+  stage?: number;
 }
 
 export interface Bridge {
@@ -70,12 +79,14 @@ export interface Trench {
   pts: Vec2[];
 }
 
-/** dry stone field wall */
+/** dry stone field wall — segment by segment, stone by stone */
 export interface StoneWall {
   x: number;
   y: number;
   len: number;
   rot: number;
+  /** per-segment hit points; 0 = breached */
+  segs?: { hp: number }[];
 }
 
 /** concrete anti-vehicle obstacle (dragon's tooth) */
@@ -83,6 +94,8 @@ export interface Barrier {
   x: number;
   y: number;
   rot: number;
+  /** 100 intact → 0 shattered */
+  hp?: number;
 }
 
 export interface FactorySite {
@@ -148,6 +161,9 @@ export class Terrain {
   private bmask!: Uint8Array;
   private bmw = 0;
   private bmh = 0;
+  // big boulders interrupt sightlines the same way
+  private rockMask!: Uint8Array;
+  private readonly ROCK_LOS_R = 4.0;
   private readonly BM_CELL = 16;
 
   // tree spatial hash
@@ -263,7 +279,8 @@ export class Terrain {
           const gx = (x / this.BM_CELL) | 0;
           const gy = (y / this.BM_CELL) | 0;
           if (gx < 0 || gy < 0 || gx >= this.bmw || gy >= this.bmh) continue;
-          if (this.bmask[gy * this.bmw + gx]) return false;
+          const idx = gy * this.bmw + gx;
+          if (this.bmask[idx] || this.rockMask[idx]) return false;
         }
       }
     }
@@ -643,6 +660,13 @@ export class Terrain {
       arr.push(b);
     }
 
+    // ── structural integrity — buildings are matter, not decals ──
+    for (const b of this.buildings) {
+      b.hpMax = buildingHpFor(b.kind);
+      b.hp = b.hpMax;
+      b.stage = b.kind === 'RUIN' ? 1 : 0;
+    }
+
     // ── labels & spot heights ─────────────────────────────────
     this.labels = [
       { x: 2950, y: 1180, text: 'HILL 214', size: 30, bold: true },
@@ -744,7 +768,13 @@ export class Terrain {
       [1480, 1220, 110, 0.35],
     ];
     for (const [x, y, len, rot] of wallSpots) {
-      this.walls.push({ x: x + rng.range(-8, 8), y: y + rng.range(-8, 8), len: len * rng.range(0.85, 1.1), rot: rot + rng.range(-0.06, 0.06) });
+      const wl = len * rng.range(0.85, 1.1);
+      const w: StoneWall = { x: x + rng.range(-8, 8), y: y + rng.range(-8, 8), len: wl, rot: rot + rng.range(-0.06, 0.06) };
+      // each wall is a chain of stone segments with its own strength
+      const nSeg = Math.max(3, Math.round(wl / 16));
+      w.segs = [];
+      for (let i = 0; i < nSeg; i++) w.segs.push({ hp: Math.round(rng.range(70, 110)) });
+      this.walls.push(w);
     }
 
     // dragon's teeth — anti-vehicle obstacles at the choke points
@@ -760,7 +790,7 @@ export class Terrain {
       for (let i = 0; i < n; i++) {
         const a = rng.range(0, Math.PI * 2);
         const d = rng.range(0, 26);
-        this.barriers.push({ x: bx + Math.cos(a) * d, y: by + Math.sin(a) * d, rot: rng.range(0, Math.PI) });
+        this.barriers.push({ x: bx + Math.cos(a) * d, y: by + Math.sin(a) * d, rot: rng.range(0, Math.PI), hp: 100 });
       }
     }
   }
@@ -940,27 +970,96 @@ export class Terrain {
     return best;
   }
 
-  /** nearest stone wall within r */
+  /** a collapsed building opens sightlines and routes; rubble remains */
+  onBuildingDestroyed(b: Building) {
+    // clear LOS occupancy over the footprint (intersect-based, matching
+    // the rasterisation so no stale cells survive)
+    const reach = Math.max(b.w, b.h) * 0.5;
+    const gx0 = Math.max(0, ((b.x - reach) / this.BM_CELL) | 0);
+    const gx1 = Math.min(this.bmw - 1, ((b.x + reach) / this.BM_CELL) | 0);
+    const gy0 = Math.max(0, ((b.y - reach) / this.BM_CELL) | 0);
+    const gy1 = Math.min(this.bmh - 1, ((b.y + reach) / this.BM_CELL) | 0);
+    const c = Math.cos(b.rot);
+    const s = Math.sin(b.rot);
+    for (let gy = gy0; gy <= gy1; gy++) {
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const px = clamp(b.x, gx * this.BM_CELL, (gx + 1) * this.BM_CELL);
+        const py = clamp(b.y, gy * this.BM_CELL, (gy + 1) * this.BM_CELL);
+        const dx = px - b.x;
+        const dy = py - b.y;
+        const lx = dx * c + dy * s;
+        const ly = -dx * s + dy * c;
+        if (Math.abs(lx) <= b.w / 2 && Math.abs(ly) <= b.h / 2) {
+          this.bmask[gy * this.bmw + gx] = 0;
+        }
+      }
+    }
+    // rubble is passable — route cost eases where the structure stood
+    const c0x = Math.max(0, ((b.x - reach) / CELL) | 0);
+    const c1x = Math.min(this.gw - 1, ((b.x + reach) / CELL) | 0);
+    const c0y = Math.max(0, ((b.y - reach) / CELL) | 0);
+    const c1y = Math.min(this.gh - 1, ((b.y + reach) / CELL) | 0);
+    for (let gy = c0y; gy <= c1y; gy++) {
+      for (let gx = c0x; gx <= c1x; gx++) {
+        const i = gy * this.gw + gx;
+        if (this.cost[i] > 0) this.cost[i] = Math.max(0.9, this.cost[i] - 5);
+      }
+    }
+  }
+
+  /** is the wall still standing where it meets (x, y)? */
+  wallSegmentAlive(w: StoneWall, x: number, y: number): boolean {
+    if (!w.segs || !w.segs.length) return true;
+    const c = Math.cos(w.rot);
+    const s = Math.sin(w.rot);
+    const dx = x - w.x;
+    const dy = y - w.y;
+    const lx = dx * c + dy * s;
+    const ly = -dx * s + dy * c;
+    if (Math.abs(lx) > w.len / 2 + 4 || Math.abs(ly) > 12) return false;
+    const segLen = w.len / w.segs.length;
+    const idx = clamp(Math.floor((lx + w.len / 2) / segLen), 0, w.segs.length - 1);
+    return w.segs[idx].hp > 0;
+  }
+
+  /** fraction of a wall still standing (0..1) */
+  wallIntegrity(w: StoneWall): number {
+    if (!w.segs || !w.segs.length) return 1;
+    let up = 0;
+    for (const s of w.segs) if (s.hp > 0) up++;
+    return up / w.segs.length;
+  }
+
+  /** nearest stone wall within r — distance measured to the wall
+   *  LINE, so a long wall shelters along its whole length */
   wallNear(x: number, y: number, r: number): StoneWall | null {
     let best: StoneWall | null = null;
     let bd = r;
     for (const w of this.walls) {
-      const d = dist(x, y, w.x, w.y);
-      if (d < Math.max(w.len * 0.5, bd) && d < bd) {
-        // rough test against the wall segment
-        const c = Math.cos(w.rot);
-        const s = Math.sin(w.rot);
-        const dx = x - w.x;
-        const dy = y - w.y;
-        const lx = dx * c + dy * s;
-        const ly = -dx * s + dy * c;
-        if (Math.abs(lx) <= w.len / 2 + 3 && Math.abs(ly) <= 10) {
-          bd = Math.max(2, Math.abs(ly));
-          best = w;
-        }
+      const c = Math.cos(w.rot);
+      const s = Math.sin(w.rot);
+      const dx = x - w.x;
+      const dy = y - w.y;
+      const lx = dx * c + dy * s;
+      const ly = -dx * s + dy * c;
+      if (Math.abs(lx) > w.len / 2 + 4) continue;
+      const d = Math.abs(ly);
+      if (d < bd) {
+        bd = d;
+        best = w;
       }
     }
     return best;
+  }
+
+  /** the closest point on a wall's centreline to (x, y) */
+  wallPointAt(w: StoneWall, x: number, y: number): { x: number; y: number } {
+    const c = Math.cos(w.rot);
+    const s = Math.sin(w.rot);
+    const dx = x - w.x;
+    const dy = y - w.y;
+    const lx = clamp(dx * c + dy * s, -w.len / 2, w.len / 2);
+    return { x: w.x + c * lx, y: w.y + s * lx };
   }
 
   // ── contour extraction (marching squares) ──────────────────
@@ -1083,6 +1182,21 @@ export class Terrain {
           if (this.railFactor(cx, cy) > 0.4) c += 1.2;
           if (this.buildingAt(cx, cy, 10)) c += 5;
           if (this.trenchDist(cx, cy) < 8) c += 1.4; // crossing a dug position
+          // boulder fields and concrete are avoided by preference
+          for (const rk of this.rocks) {
+            if (rk.r < 2.6) continue;
+            if (dist(cx, cy, rk.x, rk.y) < rk.r + 18) {
+              c += 2.2;
+              break;
+            }
+          }
+          for (const b of this.barriers) {
+            if ((b.hp ?? 100) <= 0) continue;
+            if (dist(cx, cy, b.x, b.y) < 26) {
+              c += 3.2;
+              break;
+            }
+          }
           if (this.bridgeAt(cx, cy, CELL * 0.9)) c = 0.5;
         }
         this.cost[gy * this.gw + gx] = c;
@@ -1103,10 +1217,28 @@ export class Terrain {
     this.bmw = Math.ceil(this.W / this.BM_CELL) + 1;
     this.bmh = Math.ceil(this.H / this.BM_CELL) + 1;
     this.bmask = new Uint8Array(this.bmw * this.bmh);
+    // big boulders interrupt ground-level sightlines too
+    this.rockMask = new Uint8Array(this.bmw * this.bmh);
+    for (const rk of this.rocks) {
+      if (rk.r < this.ROCK_LOS_R) continue;
+      const g0x = Math.max(0, ((rk.x - rk.r) / this.BM_CELL) | 0);
+      const g1x = Math.min(this.bmw - 1, ((rk.x + rk.r) / this.BM_CELL) | 0);
+      const g0y = Math.max(0, ((rk.y - rk.r) / this.BM_CELL) | 0);
+      const g1y = Math.min(this.bmh - 1, ((rk.y + rk.r) / this.BM_CELL) | 0);
+      for (let gy = g0y; gy <= g1y; gy++) {
+        for (let gx = g0x; gx <= g1x; gx++) {
+          const px = gx * this.BM_CELL + this.BM_CELL / 2;
+          const py = gy * this.BM_CELL + this.BM_CELL / 2;
+          if (dist(px, py, rk.x, rk.y) < rk.r * 0.9) this.rockMask[gy * this.bmw + gx] = 1;
+        }
+      }
+    }
     for (const b of this.buildings) {
       if (b.kind === 'MAST' || b.kind === 'CHECKPOINT') continue; // see-through
       const c = Math.cos(b.rot);
       const s = Math.sin(b.rot);
+      // intersect-based rasterisation: any cell the footprint touches is
+      // masked, so even a small house reliably interrupts a ground beam
       const reach = Math.max(b.w, b.h) * 0.5;
       const gx0 = Math.max(0, ((b.x - reach) / this.BM_CELL) | 0);
       const gx1 = Math.min(this.bmw - 1, ((b.x + reach) / this.BM_CELL) | 0);
@@ -1114,8 +1246,10 @@ export class Terrain {
       const gy1 = Math.min(this.bmh - 1, ((b.y + reach) / this.BM_CELL) | 0);
       for (let gy = gy0; gy <= gy1; gy++) {
         for (let gx = gx0; gx <= gx1; gx++) {
-          const px = gx * this.BM_CELL + this.BM_CELL / 2;
-          const py = gy * this.BM_CELL + this.BM_CELL / 2;
+          // closest point of the cell rect to the building centre, in
+          // building-local space — if inside the half-extents, mask
+          const px = clamp(b.x, gx * this.BM_CELL, (gx + 1) * this.BM_CELL);
+          const py = clamp(b.y, gy * this.BM_CELL, (gy + 1) * this.BM_CELL);
           const dx = px - b.x;
           const dy = py - b.y;
           const lx = dx * c + dy * s;
@@ -1322,4 +1456,28 @@ export class Terrain {
 function smooth01(t: number): number {
   t = clamp(t, 0, 1);
   return t * t * (3 - 2 * t);
+}
+
+/** structural strength by building kind — a church outlives a shed */
+export function buildingHpFor(kind: BuildingKind): number {
+  switch (kind) {
+    case 'HOUSE': return 150;
+    case 'BARN': return 185;
+    case 'SHED': return 90;
+    case 'SILO': return 120;
+    case 'CHURCH': return 250;
+    case 'HQ_CORE': return 420;
+    case 'HQ_SUPPORT': return 140;
+    case 'MAST': return 25;
+    case 'BUNKER': return 300;
+    case 'FACTORY_HALL': return 430;
+    case 'FACTORY_HALL2': return 320;
+    case 'CHIMNEY': return 210;
+    case 'STORAGE_TANK': return 90;
+    case 'DEPOT': return 140;
+    case 'SUBSTATION': return 80;
+    case 'CHECKPOINT': return 50;
+    case 'RUIN': return 60;
+    default: return 120;
+  }
 }

@@ -11,6 +11,7 @@ import type { EffectsSystem } from './effects';
 import type { ProjectileSystem } from './projectiles';
 import type { AudioEngine } from '../audio/audio';
 import type { InkEconomy } from '../systems/economy';
+import type { ObstacleSystem } from '../systems/obstacles';
 import { coverFrom, findCoverSpot } from '../systems/cover';
 import { gridString } from '../core/math';
 
@@ -21,6 +22,7 @@ export interface SimContext {
   projectiles: ProjectileSystem;
   audio: AudioEngine;
   economy: InkEconomy;
+  obstacles: ObstacleSystem;
   time: number;
   rng: RNG;
   log: (text: string, level?: 'info' | 'contact' | 'alert' | 'objective' | 'economy') => void;
@@ -70,6 +72,11 @@ export class Unit {
   private supSeekCooldown = 0;
   private standoffCheckT = 0;
   private reconCheckT = 0;
+
+  /** interrupted mission while sheltering from fire */
+  coverDivert: { resumeOrder: Order; until: number } | null = null;
+  /** the cover position we are sheltering at */
+  coverPos: Vec2 | null = null;
 
   // orders
   order: Order = { type: 'HOLD' };
@@ -166,6 +173,7 @@ export class Unit {
     this.dest = null;
     this.fireMissionLeft = 0;
     this.fireMissionArea = null;
+    this.coverDivert = null;
     this.speedNow = 0;
   }
 
@@ -175,6 +183,7 @@ export class Unit {
     this.dest = null;
     this.fireMissionLeft = 0;
     this.fireMissionArea = null;
+    this.coverDivert = null;
   }
 
   orderFireMission(area: Vec2) {
@@ -342,25 +351,68 @@ export class Unit {
       }
     }
 
-    // under fire with no orders: seek nearby cover (both factions)
+    // under fire: survival instinct. Both factions. Roles differ:
+    // guns displace, scouts withdraw — everyone else gets behind
+    // something solid and keeps fighting from there.
     if (
       this.suppression > 0.35 &&
       this.supSeekCooldown <= 0 &&
-      (this.order.type === 'HOLD' || this.order.type === 'STOP') &&
-      this.path.length === 0 &&
       this.lastAttacker &&
       !this.lastAttacker.dead &&
-      ctx.time - this.lastAttackedT < 14
+      ctx.time - this.lastAttackedT < 14 &&
+      this.def.kind !== 'SPG' &&
+      this.def.kind !== 'REC' &&
+      this.def.kind !== 'FACTORY'
     ) {
-      this.supSeekCooldown = 7;
-      const spot = findCoverSpot(ctx, this.x, this.y, this.lastAttacker.x, this.lastAttacker.y, 90);
-      if (spot && spot.value > 0.3) {
-        const current = coverFrom(ctx, this.x, this.y, this.lastAttacker.x, this.lastAttacker.y);
-        if (spot.value > current.value + 0.15) {
-          this.path = [{ x: spot.x, y: spot.y }];
-          this.dest = { x: spot.x, y: spot.y };
+      const threat = this.lastAttacker;
+      const holding =
+        (this.order.type === 'HOLD' || this.order.type === 'STOP' || this.coverDivert !== null) &&
+        this.path.length === 0;
+      const executing =
+        (this.order.type === 'MOVE' || this.order.type === 'ATTACK_MOVE') && this.path.length > 0;
+      // an assault pushes on unless the fire is genuinely withering —
+      // a scripted robot dives for every wall; a crew weighs the trade
+      const movingThreshold = this.order.type === 'ATTACK_MOVE' ? 0.62 : 0.42;
+      const wantFlinch = holding || (executing && this.suppression > movingThreshold);
+      if (wantFlinch) {
+        this.supSeekCooldown = 7;
+        const spot = findCoverSpot(ctx, this.x, this.y, threat.x, threat.y, 120);
+        if (spot && spot.protect > 0.3) {
+          const current = coverFrom(ctx, this.x, this.y, threat.x, threat.y);
+          if (spot.protect > current.value + 0.15) {
+            this.coverPos = { x: spot.x, y: spot.y };
+            if (executing && !this.coverDivert) {
+              // remember the mission — we will finish it when the fire slackens
+              this.coverDivert = { resumeOrder: this.order, until: ctx.time + 20 };
+              ctx.log(`${this.callsign} · TAKING COVER — MISSION PAUSED`, 'alert');
+            }
+            this.path = [{ x: spot.x, y: spot.y }];
+            this.dest = { x: spot.x, y: spot.y };
+          }
         }
       }
+    }
+
+    // the fire slackened, or the clock ran out — back to the mission
+    if (this.coverDivert) {
+      const done =
+        this.suppression < 0.12 ||
+        ctx.time > this.coverDivert.until ||
+        !this.lastAttacker ||
+        this.lastAttacker.dead ||
+        ctx.time - this.lastAttackedT > 16;
+      if (done) {
+        const resume = this.coverDivert.resumeOrder;
+        this.coverDivert = null;
+        this.coverPos = null;
+        if ((resume.type === 'MOVE' || resume.type === 'ATTACK_MOVE') && resume.pos) {
+          if (resume.type === 'MOVE') this.orderMove({ ...resume.pos }, ctx);
+          else this.orderAttackMove({ ...resume.pos }, ctx);
+          ctx.log(`${this.callsign} · RESUMING MOVE`, 'info');
+        }
+      }
+    } else if (this.coverPos && this.path.length === 0) {
+      this.coverPos = null;
     }
   }
 
@@ -407,7 +459,13 @@ export class Unit {
       return;
     }
 
-    const desired = angleOf(wp.x - this.x, wp.y - this.y);
+    const desired0 = angleOf(wp.x - this.x, wp.y - this.y);
+    // steer around physical matter — boulders, buildings, wrecks
+    let desired = desired0;
+    if (ctx.obstacles) {
+      const avoid = ctx.obstacles.avoidSteer(this);
+      if (avoid !== 0) desired = desired0 + avoid * 0.55;
+    }
     const diff = angDiff(this.angle, desired);
     const turnCap = this.def.turnRate * dt;
     this.angle = rotateToward(this.angle, desired, turnCap);
@@ -443,6 +501,14 @@ export class Unit {
         this.x += Math.cos(a) * push;
         this.y += Math.sin(a) * push;
       }
+    }
+
+    // the world is solid: rocks, walls, buildings, felled steel.
+    // tracked armour ploughs through timber and dry stone — visibly.
+    if (ctx.obstacles) {
+      const hit = ctx.obstacles.resolve(this, dt, ctx);
+      if (hit.slow < 1) this.speedNow *= hit.slow;
+      if (hit.crushed) this.suppression = Math.min(1, this.suppression + 0.02);
     }
 
     // stuck detection: nudge sideways
@@ -948,6 +1014,8 @@ export class Unit {
         smokeUntil: ctx.time + 240,
         turretToss: null,
       });
+      // a downed aircraft is terrain now
+      ctx.obstacles?.addWreck(this.x + Math.cos(dir) * 44, this.y + Math.sin(dir) * 44, 10);
       ctx.log(`${this.callsign} · SHOT DOWN`, 'alert');
     } else {
       fx.spawnExplosion(this.x, this.y, {
@@ -994,6 +1062,8 @@ export class Unit {
         smokeUntil: ctx.time + (this.def.kind === 'HQ' ? 400 : 150),
         turretToss: toss,
       });
+      // dead steel remains part of the fight — cover, obstacle, memory
+      if (this.def.kind !== 'HQ') ctx.obstacles?.addWreck(this.x, this.y, this.def.length);
       if (this.def.kind === 'HQ') {
         fx.stampScorch(this.x, this.y, 42, 0.5);
       }

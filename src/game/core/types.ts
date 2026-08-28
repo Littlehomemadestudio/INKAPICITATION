@@ -134,6 +134,7 @@ export interface HudSnapshot {
     vision: number;
     armor: string;
     suppression: number;
+    cover: string;
   } | null;
   log: LogEntry[];
   air: { callsign: string; state: string; missiles: number; hp: number }[];
