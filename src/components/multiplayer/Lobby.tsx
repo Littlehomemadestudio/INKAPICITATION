@@ -7,8 +7,11 @@ import { MP_MAPS, Team, GameMode, MapId } from '@/game/net/protocol';
 export function Lobby() {
   const { state, send } = useMultiplayer();
   const lobby = state.lobby!;
-  const isHost = state.profile?.playerId === lobby.hostId;
-  const me = lobby.players.find(p => p.playerId === state.profile?.playerId);
+  // Use myPlayerId (authoritative, always available once server acks us)
+  // with profile.playerId as fallback.
+  const myId = state.myPlayerId ?? state.profile?.playerId;
+  const isHost = myId === lobby.hostId;
+  const me = lobby.players.find(p => p.playerId === myId);
   const myReady = me?.status === 'READY';
   const humans = lobby.players.filter(p => !p.isAI);
   const allReady = humans.every(p => p.status === 'READY');
@@ -218,7 +221,7 @@ export function Lobby() {
           <div>
             <div className="mp-section-label" style={{ marginBottom: 8 }}>HOST CONTROLS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {lobby.players.filter(p => p.playerId !== state.profile?.playerId && !p.isAI).map(p => (
+              {lobby.players.filter(p => p.playerId !== myId && !p.isAI).map(p => (
                 <div key={p.playerId} style={{ display: 'flex', gap: 6 }}>
                   <button className="mp-btn mp-btn-danger" style={{ flex: 1, padding: '6px 10px', fontSize: 9 }}
                     onClick={() => send({ type: 'HOST_KICK', playerId: p.playerId })}>

@@ -6,7 +6,8 @@ export function Results() {
   const { state, send } = useMultiplayer();
   const results = state.results;
   const lobby = state.lobby;
-  const isHost = state.profile?.playerId === lobby?.hostId;
+  const myId = state.myPlayerId ?? state.profile?.playerId;
+  const isHost = myId === lobby?.hostId;
 
   if (!results) {
     return (
@@ -18,7 +19,7 @@ export function Results() {
     );
   }
 
-  const myTeam = lobby?.players.find(p => p.playerId === state.profile?.playerId)?.team;
+  const myTeam = lobby?.players.find(p => p.playerId === myId)?.team;
   const weWon = results.winningTeam && results.winningTeam === myTeam;
 
   return (
@@ -43,7 +44,7 @@ export function Results() {
 
       {/* My stats */}
       {myTeam && (() => {
-        const myStats = results.stats.find(s => s.playerId === state.profile?.playerId);
+        const myStats = results.stats.find(s => s.playerId === myId);
         if (!myStats) return null;
         return (
           <div className="mp-results-stats">

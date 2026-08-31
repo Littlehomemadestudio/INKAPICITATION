@@ -39,7 +39,7 @@ export default function MultiplayerApp() {
           <div className="mp-topbar-right" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
             {state.profile && (
               <span className="mp-section-label" style={{ color: 'var(--ps-txt)' }}>
-                {state.profile.name}
+                {state.profile.name ?? 'COMMANDER'}
               </span>
             )}
             <NetworkIndicator quality={quality} ping={state.ping} status={state.status} />

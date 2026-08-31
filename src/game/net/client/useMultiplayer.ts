@@ -40,12 +40,17 @@ export interface MultiplayerState {
   countdownEndsAt: number | null;
   // Reconnect
   reconnecting: boolean;
+  // Authoritative local player ID — set from IDENTITY and LOBBY_JOINED.
+  // Always available once the server has acknowledged us, even if profile
+  // hasn't fully propagated yet.
+  myPlayerId: string | null;
 }
 
 const INITIAL_STATE: MultiplayerState = {
   status: 'DISCONNECTED',
   ping: 0,
   profile: null,
+  myPlayerId: null,
   phase: 'SEARCHING',
   lobby: null,
   latestSnapshot: null,
@@ -108,10 +113,28 @@ class MPStore {
   private handleMessage(msg: LobbyServerMessage) {
     switch (msg.type) {
       case 'IDENTITY':
-        this.set({ profile: msg.profile });
+        // Set both profile and myPlayerId — myPlayerId is the authoritative
+        // id used for lobby lookups, available immediately.
+        this.set({ profile: msg.profile, myPlayerId: msg.profile.playerId });
         break;
 
       case 'LOBBY_JOINED':
+        // LOBBY_JOINED carries yourPlayerId — use it as a fallback in case
+        // IDENTITY hasn't been processed yet (race condition on join).
+        this.set({
+          lobby: msg.lobby,
+          myPlayerId: msg.yourPlayerId ?? this.state.myPlayerId,
+          profile: this.state.profile ?? (msg.yourPlayerId
+            ? { playerId: msg.yourPlayerId, name: 'COMMANDER' }
+            : null),
+          phase: msg.lobby.status === 'COUNTDOWN' ? 'STARTING' :
+                 msg.lobby.status === 'IN_MATCH' ? 'IN_MATCH' :
+                 msg.lobby.status === 'CLOSED' ? 'FINISHED' : 'LOBBY',
+          countdownEndsAt: msg.lobby.countdownEndsAt ?? null,
+          error: null,
+        });
+        break;
+
       case 'LOBBY_STATE':
         this.set({
           lobby: msg.lobby,
@@ -261,6 +284,8 @@ class MPStore {
                  msg.lobby.status === 'IN_MATCH' ? 'IN_MATCH' : 'LOBBY',
           info: 'RECONNECTED',
         });
+        // myPlayerId is preserved across reconnection — the server resumes
+        // the same session via reconnectToken.
         setTimeout(() => {
           if (this.state.info === 'RECONNECTED') this.set({ info: null });
         }, 3000);

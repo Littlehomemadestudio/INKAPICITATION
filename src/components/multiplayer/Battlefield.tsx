@@ -54,6 +54,10 @@ export function Battlefield() {
   const commsIdRef = useRef(1);
   const lastSnapshotTickRef = useRef(0);
 
+  // Authoritative local player ID — use myPlayerId (always set from
+  // IDENTITY and LOBBY_JOINED) with profile.playerId as fallback.
+  const myId = state.myPlayerId ?? myId;
+
   const snapshot = state.latestSnapshot;
   const mapDef = snapshot ? MP_MAPS[state.lobby?.config.map ?? 'COASTAL_THEATER'] : null;
 
@@ -263,7 +267,7 @@ export function Battlefield() {
       let bestD = 16 / cam.zoom;
       for (const u of interpUnits.values()) {
         if (u.dead) continue;
-        if (u.owner !== state.profile?.playerId) continue;
+        if (u.owner !== myId) continue;
         const d = Math.hypot(u.dx - world.x, u.dy - world.y);
         if (d < bestD) { bestD = d; clicked = u; }
       }
@@ -324,7 +328,7 @@ export function Battlefield() {
       const interpUnits = interpUnitsRef.current;
       for (const u of interpUnits.values()) {
         if (u.dead) continue;
-        if (u.owner !== state.profile?.playerId) continue;
+        if (u.owner !== myId) continue;
         if (u.dx >= minX && u.dx <= maxX && u.dy >= minY && u.dy <= maxY) {
           selectionRef.current.add(u.id);
         }
