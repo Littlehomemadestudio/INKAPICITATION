@@ -997,3 +997,195 @@
     line-height: 1.6;
   }
 }
+
+/* -------------------------------------------------------------
+   PAPER STORM / landing - military editorial
+   Paper surfaces, ink typography, hairline instrumentation.
+   ------------------------------------------------------------- */
+
+.lp-root {
+  background: var(--ps-paper);
+  color: var(--ps-ink);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* paper fibre - the same grain the briefing sheet uses */
+.lp-grain {
+  background-image:
+    radial-gradient(rgba(60, 52, 38, 0.055) 1px, transparent 1px),
+    radial-gradient(rgba(60, 52, 38, 0.035) 1px, transparent 1px),
+    radial-gradient(rgba(120, 105, 80, 0.04) 1px, transparent 1px);
+  background-size: 6px 6px, 11px 11px, 23px 23px;
+  background-position: 0 0, 4px 5px, 9px 13px;
+}
+
+.lp-mono {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+.lp-display {
+  font-family: var(--font-display), Georgia, serif;
+}
+
+/* kicker - small caps with a measured lead-in rule */
+.lp-kicker {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: #6b6557;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+.lp-kicker::before {
+  content: '';
+  width: 34px;
+  height: 1px;
+  background: #8b8577;
+}
+
+/* the one primary actuator - an ink block, not a pill */
+.lp-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  background: var(--ps-ink);
+  color: var(--ps-paper);
+  border: 1px solid var(--ps-ink);
+  border-radius: 0;
+  padding: 17px 30px 16px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 140ms linear, color 140ms linear;
+}
+.lp-cta:hover {
+  background: #2c2820;
+  border-color: #2c2820;
+}
+.lp-cta .lp-cta-arrow {
+  transition: transform 140ms linear;
+}
+.lp-cta:hover .lp-cta-arrow {
+  transform: translateX(3px);
+}
+
+.lp-cta-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  background: transparent;
+  color: var(--ps-ink);
+  border: 1px solid #8b8577;
+  border-radius: 0;
+  padding: 17px 30px 16px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 140ms linear, background 140ms linear;
+}
+.lp-cta-ghost:hover {
+  border-color: var(--ps-ink);
+  background: rgba(23, 21, 15, 0.04);
+}
+
+/* selection brackets - lifted from the game's UI language */
+.lp-bracket {
+  position: relative;
+}
+.lp-bracket::before,
+.lp-bracket::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: #4c473d;
+  border-style: solid;
+  pointer-events: none;
+}
+.lp-bracket::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1.5px 0 0 1.5px;
+}
+.lp-bracket::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 1.5px 1.5px 0;
+}
+
+/* scroll reveal - once, quiet, respectful of reduced motion */
+.lp-reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 700ms cubic-bezier(0.22, 0.6, 0.3, 1), transform 700ms cubic-bezier(0.22, 0.6, 0.3, 1);
+}
+.lp-reveal.is-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .lp-cta .lp-cta-arrow,
+  .lp-cta:hover .lp-cta-arrow {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* recognition-plate canvases render pixel-crisp */
+.lp-glyph canvas {
+  display: block;
+}
+
+/* the quiet ledger rows */
+.lp-ledger-row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 18px;
+  padding: 13px 0;
+  border-bottom: 1px solid #d8d4c8;
+  align-items: baseline;
+}
+.lp-ledger-row:last-child {
+  border-bottom: 0;
+}
+
+/* keyboard chips in the field-manual column */
+.lp-kbd {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 9px;
+  border: 1px solid #b9b4a6;
+  border-radius: 2px;
+  padding: 1px 5px;
+  color: #403c33;
+  background: #eceade;
+  white-space: nowrap;
+}
+
+/* nav - paper, hairline, ink */
+.lp-nav {
+  background: rgba(243, 241, 234, 0.92);
+  border-bottom: 1px solid transparent;
+  transition: border-color 200ms linear;
+}
+.lp-nav.is-scrolled {
+  border-bottom-color: #d8d4c8;
+}
+
+/* footer ink sheet */
+.lp-footer {
+  background: #12110e;
+  color: #d9d6cc;
+}
+
