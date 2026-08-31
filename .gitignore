@@ -1,2 +1,78 @@
-skills/
+# ─────────────────────────────────────────────
+# PAPER STORM — only ship what runs the game
+# ─────────────────────────────────────────────
+
+# ── dependencies & caches ────────────────────
 node_modules/
+.pnp
+.pnp.*
+.yarn/
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+.npm
+.eslintcache
+*.tsbuildinfo
+.next/
+out/
+build/
+dist/
+.turbo/
+.vercel
+next-env.d.ts
+
+# ── logs & debug output ──────────────────────
+*.log
+dev.log
+server.log
+dev.out.log
+dev.err.log
+tsc.log
+tsc.err
+lint.log
+lint.err
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.pid
+
+# ── secrets & local env ──────────────────────
+.env
+.env.*
+!.env.example
+
+# ── local data & generated artifacts ─────────
+/db/
+/download/
+/tool-results/
+/public/shots/
+*.db
+*.sqlite
+*.sqlite3
+
+# ── non-essential project directories ────────
+/examples/
+/mini-services/
+/tests/
+/scripts/
+/.zscripts/
+/worklog.md
+
+# ── tooling & assistant droppings ────────────
+.claude
+.z-ai-config
+/skills/
+prompt
+test
+local-*
+*.pem
+
+# ── OS / editor noise ────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.idea/
+.vscode/
