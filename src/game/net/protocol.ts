@@ -169,6 +169,7 @@ export interface ProductionSnapshot {
   name: string;
   progress: number;         // 0..1
   remainingSec: number;
+  totalSec: number;
 }
 
 export interface GameStateSnapshot {

@@ -843,6 +843,7 @@ export class HeadlessGame {
           battalionId: pr.battalionId, name: pr.name,
           progress: 1 - pr.remaining / pr.total,
           remainingSec: pr.remaining,
+          totalSec: pr.total,
         })),
       myPlayerId: forPlayerId,
       myTeam,

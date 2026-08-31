@@ -1,6 +1,8 @@
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · input & command
 // Precise RTS controls: box select, context orders, hotkeys.
+// In multiplayer client mode, orders are intercepted and emitted
+// as CommandPayload to the server instead of mutating units.
 // ─────────────────────────────────────────────────────────────
 
 import { Unit } from '../entities/units';
@@ -8,6 +10,7 @@ import type { Camera } from './camera';
 import type { Game } from '../Game';
 import { dist, clamp } from '../core/math';
 import { refineCover } from './cover';
+import type { CommandPayload } from '../net/protocol';
 
 export type CursorMode = 'NORMAL' | 'ATTACK_MOVE' | 'FIRE_MISSION';
 
@@ -76,10 +79,18 @@ export class InputSystem {
           this.game.audio.uiTick();
         }
       } else if (k === 's') {
-        for (const u of this.selection) u.orderStop();
+        if (this.game.mode === 'client') {
+          this.emitCommand({ kind: 'STOP', unitIds: this.selection.map(u => u.id) });
+        } else {
+          for (const u of this.selection) u.orderStop();
+        }
         this.game.log(`${this.selection.length} UNIT(S) — HALT ORDER`);
       } else if (k === 'h') {
-        for (const u of this.selection) u.orderHold();
+        if (this.game.mode === 'client') {
+          this.emitCommand({ kind: 'HOLD', unitIds: this.selection.map(u => u.id) });
+        } else {
+          for (const u of this.selection) u.orderHold();
+        }
         this.game.log(`${this.selection.length} UNIT(S) — HOLD POSITION`);
       }
     };
@@ -294,8 +305,32 @@ export class InputSystem {
     }
     this.game.audio.uiTick();
 
+    const unitIds = sel.map(u => u.id);
+
     // enemy under cursor → attack / fire mission
     const enemy = this.unitAt(w.x, w.y, false);
+
+    // ── CLIENT MODE: emit commands, don't mutate units ──
+    if (this.game.mode === 'client') {
+      if (enemy && enemy.faction === 'ENEMY') {
+        this.emitCommand({ kind: 'ATTACK', unitIds, targetId: enemy.id });
+        this.game.effects.orderMarker(enemy.x, enemy.y, 'attack');
+        this.game.log(`${sel.length} UNIT(S) — ATTACK ORDER`);
+      } else {
+        const air = sel.filter(u => u.isAir);
+        const ground = sel.filter(u => !u.isAir);
+        if (air.length && ground.length === 0) {
+          this.emitCommand({ kind: 'LAUNCH_AIR', unitIds, x: w.x, y: w.y });
+        } else {
+          this.emitCommand({ kind: 'MOVE', unitIds, x: w.x, y: w.y });
+          this.game.effects.orderMarker(w.x, w.y, 'move');
+          this.game.log(`${sel.length} UNIT(S) — MOVE ORDER`);
+        }
+      }
+      return;
+    }
+
+    // ── SINGLE-PLAYER: mutate units directly ──
     if (enemy && enemy.faction === 'ENEMY') {
       const arty = sel.filter((u) => u.def.projectile === 'ARTY' && !u.isShip);
       const direct = sel.filter((u) => u.def.projectile !== 'ARTY' || u.isShip);
@@ -329,6 +364,26 @@ export class InputSystem {
     const w = this.camera.screenToWorld(sx, sy);
     const sel = this.selection.filter((u) => !u.dead);
     if (!sel.length) return;
+    const unitIds = sel.map(u => u.id);
+
+    // ── CLIENT MODE: emit commands ──
+    if (this.game.mode === 'client') {
+      if (this.cursorMode === 'ATTACK_MOVE') {
+        this.emitCommand({ kind: 'ATTACK_MOVE', unitIds, x: w.x, y: w.y });
+        this.game.effects.orderMarker(w.x, w.y, 'attack');
+        this.game.log(`${sel.length} UNIT(S) — ATTACK-MOVE`);
+      } else if (this.cursorMode === 'FIRE_MISSION') {
+        const arty = sel.filter(u => u.def.projectile === 'ARTY');
+        if (arty.length) {
+          this.emitCommand({ kind: 'FIRE_MISSION', unitIds: arty.map(u => u.id), x: w.x, y: w.y });
+          this.game.effects.orderMarker(w.x, w.y, 'fire');
+          this.game.log(`${arty.length} GUN(S) · FIRE MISSION — GRID ${Math.floor(clamp(w.x, 0, 9999) / 10)}-${Math.floor(clamp(w.y, 0, 9999) / 10)}`);
+        }
+      }
+      return;
+    }
+
+    // ── SINGLE-PLAYER: mutate units ──
     if (this.cursorMode === 'ATTACK_MOVE') {
       const ground = sel.filter((u) => !u.isAir);
       this.formationMove(ground, w, true);
@@ -407,12 +462,27 @@ export class InputSystem {
 
   // ── HUD command hooks ──────────────────────────────────────
 
+  /** Emit a command to the server (client mode only) */
+  private emitCommand(payload: CommandPayload) {
+    if (this.game.onCommand) {
+      this.game.onCommand(payload);
+    }
+  }
+
   commandStop() {
-    for (const u of this.selection) u.orderStop();
+    if (this.game.mode === 'client') {
+      this.emitCommand({ kind: 'STOP', unitIds: this.selection.map(u => u.id) });
+    } else {
+      for (const u of this.selection) u.orderStop();
+    }
   }
 
   commandHold() {
-    for (const u of this.selection) u.orderHold();
+    if (this.game.mode === 'client') {
+      this.emitCommand({ kind: 'HOLD', unitIds: this.selection.map(u => u.id) });
+    } else {
+      for (const u of this.selection) u.orderHold();
+    }
   }
 
   commandAttackMove() {

@@ -21,6 +21,23 @@ import type { Unit, SimContext } from './entities/units';
 import type { HudSnapshot, HudUnitLine, LogEntry, AfterActionReport } from './core/types';
 import { RNG, clockString, clamp } from './core/math';
 import { coverFrom } from './systems/cover';
+import type { GameStateSnapshot, UnitSnapshot, CommandPayload, Team } from './net/protocol';
+import { MP_BATTALIONS } from './net/protocol';
+import { Unit as GameUnit } from './entities/units';
+import { UNIT_DEFS } from './entities/unitDefs';
+const UNIT_DEFS_LOOKUP = UNIT_DEFS;
+
+export type GameMode = 'single' | 'client';
+
+export interface GameOptions {
+  mode?: GameMode;
+  /** In client mode, called when the player issues an order. */
+  onCommand?: (payload: CommandPayload) => void;
+  /** In client mode, the local player's ID (for filtering selection). */
+  myPlayerId?: string;
+  /** In client mode, the local player's team (for faction mapping). */
+  myTeam?: Team;
+}
 
 export class Game {
   canvas: HTMLCanvasElement;
@@ -68,11 +85,24 @@ export class Game {
   onHud: (s: HudSnapshot) => void;
   private disposed = false;
 
-  constructor(canvas: HTMLCanvasElement, onHud: (s: HudSnapshot) => void, seed?: number) {
+  // ── multiplayer client mode ──
+  mode: GameMode;
+  onCommand?: (payload: CommandPayload) => void;
+  myPlayerId?: string;
+  myTeam?: Team;
+  /** interpolation state for smooth remote unit motion */
+  private unitLerp: Map<number, { fromX: number; fromY: number; toX: number; toY: number; t: number }> = new Map();
+  private snapshotTick = 0;
+
+  constructor(canvas: HTMLCanvasElement, onHud: (s: HudSnapshot) => void, seed?: number, options?: GameOptions) {
     this.canvas = canvas;
     this.onHud = onHud;
     this.ctx = canvas.getContext('2d', { alpha: false })!;
     this.seed = seed ?? Math.floor(Math.random() * 1e9);
+    this.mode = options?.mode ?? 'single';
+    this.onCommand = options?.onCommand;
+    this.myPlayerId = options?.myPlayerId;
+    this.myTeam = options?.myTeam;
 
     this.audio = new AudioEngine();
     this.terrain = new Terrain(this.seed);
@@ -87,6 +117,13 @@ export class Game {
     this.renderer.initFonts();
 
     this.loadScenario();
+
+    // In client mode, we don't run the sim — the server is authoritative.
+    // We clear the scenario units and wait for snapshots.
+    if (this.mode === 'client') {
+      this.units = [];
+      this.running = true;  // let effects/camera update, but simStep is skipped
+    }
 
     this.simCtxCache = {
       units: this.units,
@@ -233,6 +270,16 @@ export class Game {
   /** player queues a unit from the arsenal / deploy panel */
   queueBattalion(battalionId: string): boolean {
     if (this.result) return false;
+
+    // ── client mode: emit command to server ──
+    if (this.mode === 'client') {
+      this.emitCommand({ kind: 'QUEUE_BATTALION', battalionId });
+      this.log(`ORDER TRANSMITTED — ${battalionId}`, 'economy');
+      this.audio.uiTick();
+      return true;
+    }
+
+    // ── single-player: local validation ──
     const def = FRIEND_BATTALIONS.find((b) => b.id === battalionId);
     if (!def) return false;
     if (this.economy.ink.FRIEND < def.cost) {
@@ -257,6 +304,141 @@ export class Game {
     this.audio.uiTick();
   }
 
+  // ── multiplayer client mode: sync from server snapshot ─────
+
+  /**
+   * Update the local game state from a server snapshot.
+   * Creates/updates/removes real Unit objects so the real Renderer
+   * can draw them with full fidelity.
+   */
+  syncFromSnapshot(snap: GameStateSnapshot) {
+    if (this.mode !== 'client') return;
+    this.snapshotTick = snap.tick;
+    this.time = snap.time;
+
+    // Map team → faction: my team is FRIEND, enemy team is ENEMY.
+    // This way all existing rendering/input/economy logic works unchanged.
+    const myTeam = snap.myTeam;
+    const friendTeam: Team = myTeam;
+    const enemyTeam: Team = myTeam === 'BLACK' ? 'GRAY' : 'BLACK';
+
+    // ── update economy ──
+    this.economy.ink.FRIEND = snap.ink[friendTeam];
+    this.economy.ink.ENEMY = snap.ink[enemyTeam];
+
+    // ── update sectors ──
+    for (const ss of snap.sectors) {
+      const es = this.economy.sectors.find(s => s.id === ss.id);
+      if (!es) continue;
+      es.control = ss.control === friendTeam ? 'FRIEND' :
+                   ss.control === enemyTeam ? 'ENEMY' : 'NEUTRAL';
+      es.capturing = ss.capturing === friendTeam ? 'FRIEND' :
+                     ss.capturing === enemyTeam ? 'ENEMY' : null;
+      es.captureT = ss.captureProgress * (es.captureTime || 7);
+    }
+
+    // ── update units ──
+    const seen = new Set<number>();
+    for (const su of snap.units) {
+      seen.add(su.id);
+      let u = this.units.find(u => u.id === su.id);
+      const faction = su.team === friendTeam ? 'FRIEND' : 'ENEMY';
+
+      if (!u) {
+        // Create a new real Unit instance
+        const type = su.type as any;
+        if (!UNIT_DEFS_LOOKUP[type]) continue; // skip unknown types
+        u = new GameUnit(type, faction, su.x, su.y, su.callsign, this.seed);
+        u.id = su.id; // overwrite auto-assigned id with server id
+        // for ships, mount states are created in constructor
+        this.units.push(u);
+      }
+
+      // Update interpolation target
+      const prev = this.unitLerp.get(su.id);
+      if (prev) {
+        // continue from current interpolated position toward new target
+        this.unitLerp.set(su.id, {
+          fromX: u.x, fromY: u.y,
+          toX: su.x, toY: su.y,
+          t: 0,
+        });
+      } else {
+        // first time seeing this unit — snap immediately
+        u.x = su.x; u.y = su.y;
+        this.unitLerp.set(su.id, { fromX: su.x, fromY: su.y, toX: su.x, toY: su.y, t: 1 });
+      }
+
+      // Update render-relevant fields
+      u.angle = su.angle;
+      u.turretAngle = su.turretAngle;
+      u.hp = su.hp;
+      u.ammo = su.ammo;
+      u.dead = su.dead;
+      u.suppression = su.suppression || 0;
+      u.damageFlash = su.damageFlash || 0;
+      u.intel = su.intel === 'OWN' ? 'DETECTED' : su.intel; // FRIEND units visible
+      if (su.knownX != null) { u.knownX = su.knownX; u.knownY = su.knownY ?? su.knownY; }
+      if (su.airState) u.airState = su.airState as any;
+      if (su.sinking != null) u.sinking = su.sinking;
+      // set order type for activity display
+      u.order = { type: su.orderType as any } as any;
+    }
+
+    // Remove units not in snapshot (after a grace period for sink animations)
+    this.units = this.units.filter(u => {
+      if (seen.has(u.id)) return true;
+      // let sinking ships finish their animation
+      if (u.sinking && u.sinkT < 6) return true;
+      this.unitLerp.delete(u.id);
+      return false;
+    });
+
+    // Clean up selection (remove dead/desynced units)
+    this.input.selection = this.input.selection.filter(u => seen.has(u.id) && !u.dead);
+
+    // ── update projectiles ──
+    // Replace the projectile list with snapshot data
+    this.projectiles.list = snap.projectiles.map(p => ({
+      kind: p.kind as any,
+      friend: p.team === friendTeam,
+      x: p.x, y: p.y,
+      vx: p.vx, vy: p.vy,
+      z: 0, vz: 0,
+      angle: Math.atan2(p.vy, p.vx),
+      t: 0, ttl: p.ttl,
+      damage: 0, splash: 0,
+      ownerId: 0, targetId: -1,
+      aimX: p.x, aimY: p.y,
+      startX: p.x, startY: p.y,
+      flightT: 0, flightTotal: 0, arcH: 0,
+      trailTimer: 0, whistled: false, defeated: false, dead: false,
+    })) as any;
+
+    // ── update productions (for HUD) ──
+    // Map MP productions to the economy's production format
+    this.economy.productions = snap.productions.map(p => ({
+      id: p.id,
+      faction: 'FRIEND' as const,
+      battalion: { id: p.battalionId, name: p.name, cost: 0, buildTime: p.totalSec ?? 0, composition: '', kinds: [], units: [], desc: '' } as any,
+      remaining: p.remainingSec,
+      total: p.remainingSec / (1 - p.progress) || p.remainingSec,
+    })) as any;
+
+    // ── update result ──
+    if (snap.result) {
+      const weWon = snap.result === `${friendTeam}_VICTORY`;
+      this.result = weWon ? 'VICTORY' : 'DEFEAT';
+    }
+  }
+
+  /** In client mode, emit a command to the server instead of mutating units. */
+  emitCommand(payload: CommandPayload) {
+    if (this.onCommand) {
+      this.onCommand(payload);
+    }
+  }
+
   // ── main loop ──────────────────────────────────────────────
 
   private loop(now: number) {
@@ -270,15 +452,22 @@ export class Game {
     this.camera.update(dt);
     this.audio.music?.update(dt);
 
-    if (this.running && !this.paused && !this.result) {
-      const steps = this.speed;
-      for (let i = 0; i < steps; i++) {
-        this.simStep(dt);
+    if (this.mode === 'single') {
+      // ── single-player: run the full sim ──
+      if (this.running && !this.paused && !this.result) {
+        const steps = this.speed;
+        for (let i = 0; i < steps; i++) {
+          this.simStep(dt);
+        }
+      } else if (this.result) {
+        this.effects.update(dt);
+        this.projectiles.update(dt, this.simCtx());
       }
-    } else if (this.result) {
-      // let the last effects settle
+    } else {
+      // ── client mode: no sim, just interpolate + effects + audio ──
+      this.interpolateUnits(dt);
       this.effects.update(dt);
-      this.projectiles.update(dt, this.simCtx());
+      this.audio.updateListener(this.camera.x, this.camera.y, this.camera.viewW / this.camera.zoom);
     }
 
     this.renderer.draw(this.ctx, this, this.dpr);
@@ -290,6 +479,17 @@ export class Game {
     }
 
     this.raf = requestAnimationFrame(this.loop);
+  }
+
+  /** smooth remote unit motion between snapshots */
+  private interpolateUnits(dt: number) {
+    for (const [id, lerp] of this.unitLerp) {
+      lerp.t = Math.min(1, lerp.t + dt * 10); // ~100ms to reach target
+      const u = this.units.find(u => u.id === id);
+      if (!u) continue;
+      u.x = lerp.fromX + (lerp.toX - lerp.fromX) * lerp.t;
+      u.y = lerp.fromY + (lerp.toY - lerp.fromY) * lerp.t;
+    }
   }
 
   private resultLogged = false;
@@ -679,10 +879,15 @@ export class Game {
       incomeFactories: inc.factories,
       sectorsHeld: this.economy.sectorsHeld('FRIEND'),
       sectorsTotal: this.economy.sectors.length,
-      battalions: FRIEND_BATTALIONS.map((b) => ({
-        ...b,
-        available: this.economy.ink.FRIEND >= b.cost && this.economy.canQueue('FRIEND') && !this.result,
-      })),
+      battalions: this.mode === 'client'
+        ? MP_BATTALIONS.map((b) => ({
+            ...b,
+            available: this.economy.ink.FRIEND >= b.cost && !this.result,
+          }))
+        : FRIEND_BATTALIONS.map((b) => ({
+            ...b,
+            available: this.economy.ink.FRIEND >= b.cost && this.economy.canQueue('FRIEND') && !this.result,
+          })),
       arsenalOpen: this.arsenalOpen,
       production: this.economy.productions
         .filter((p) => p.faction === 'FRIEND')
