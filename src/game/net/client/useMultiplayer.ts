@@ -97,10 +97,34 @@ class MPStore {
 
   connect(reconnectToken?: string) {
     const c = this.init();
-    if (reconnectToken) {
-      this.set({ reconnecting: true });
+    // If we have a stored playerId from a previous session, use it as
+    // the reconnect token so the server can restore our identity.
+    // This prevents getting a new playerId on every reconnection.
+    const storedToken = reconnectToken ?? this.storedReconnectToken ?? this.loadStoredToken();
+    // Don't set reconnecting=true here — only set it if the socket actually
+    // disconnects and retries. The first connect is a fresh connection.
+    c.connect(storedToken);
+  }
+
+  private storedReconnectToken: string | null = null;
+
+  private loadStoredToken(): string | null {
+    if (typeof window === 'undefined') return null;
+    try {
+      return localStorage.getItem('ps_mp_player_id') || null;
+    } catch {
+      return null;
     }
-    c.connect(reconnectToken);
+  }
+
+  private saveStoredToken(id: string | null) {
+    if (typeof window === 'undefined') return;
+    try {
+      if (id) localStorage.setItem('ps_mp_player_id', id);
+      else localStorage.removeItem('ps_mp_player_id');
+    } catch {
+      // ignore
+    }
   }
 
   send(msg: LobbyClientMessage) {
@@ -115,7 +139,16 @@ class MPStore {
       case 'IDENTITY':
         // Set both profile and myPlayerId — myPlayerId is the authoritative
         // id used for lobby lookups, available immediately.
-        this.set({ profile: msg.profile, myPlayerId: msg.profile.playerId });
+        // Clear reconnecting — we have a valid identity now.
+        this.set({
+          profile: msg.profile,
+          myPlayerId: msg.profile.playerId,
+          reconnecting: false,
+        });
+        // Store the playerId as the reconnect token so we can resume
+        // the same identity if the socket reconnects (ping timeout, etc.)
+        this.storedReconnectToken = msg.profile.playerId;
+        this.saveStoredToken(msg.profile.playerId);
         break;
 
       case 'LOBBY_JOINED':

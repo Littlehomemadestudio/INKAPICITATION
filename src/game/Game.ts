@@ -22,7 +22,7 @@ import type { HudSnapshot, HudUnitLine, LogEntry, AfterActionReport } from './co
 import { RNG, clockString, clamp } from './core/math';
 import { coverFrom } from './systems/cover';
 import type { GameStateSnapshot, UnitSnapshot, CommandPayload, Team } from './net/protocol';
-import { MP_BATTALIONS } from './net/protocol';
+import { MP_MAP_SEEDS } from './net/protocol';
 import { Unit as GameUnit } from './entities/units';
 import { UNIT_DEFS } from './entities/unitDefs';
 const UNIT_DEFS_LOOKUP = UNIT_DEFS;
@@ -879,15 +879,10 @@ export class Game {
       incomeFactories: inc.factories,
       sectorsHeld: this.economy.sectorsHeld('FRIEND'),
       sectorsTotal: this.economy.sectors.length,
-      battalions: this.mode === 'client'
-        ? MP_BATTALIONS.map((b) => ({
-            ...b,
-            available: this.economy.ink.FRIEND >= b.cost && !this.result,
-          }))
-        : FRIEND_BATTALIONS.map((b) => ({
-            ...b,
-            available: this.economy.ink.FRIEND >= b.cost && this.economy.canQueue('FRIEND') && !this.result,
-          })),
+      battalions: FRIEND_BATTALIONS.map((b) => ({
+        ...b,
+        available: this.economy.ink.FRIEND >= b.cost && this.economy.canQueue('FRIEND') && !this.result,
+      })),
       arsenalOpen: this.arsenalOpen,
       production: this.economy.productions
         .filter((p) => p.faction === 'FRIEND')

@@ -293,129 +293,27 @@ export const NET = {
   AI_DECISION_INTERVAL_SEC: 0.5,
 } as const;
 
-// ── Battalions available in MP (subset of single-player roster) ──
+// ── Map seeds ──
+// Maps are NOT duplicated definitions. The real Terrain is seed-based
+// and deterministic — different seeds produce different battlefields.
+// Each "map" in MP is just a different seed of the real Terrain.
+// The real buildScenario generates sectors, objectives, and anchors.
+// Black team = FRIEND faction (spawns SW), Gray team = ENEMY faction (spawns NE).
 
-export interface MPBattalion {
-  id: string;
-  name: string;
-  cost: number;
-  buildTime: number;
-  units: { type: string; n: number }[];
-  branch: 'GROUND' | 'AIR' | 'NAVAL';
-}
-
-export const MP_BATTALIONS: MPBattalion[] = [
-  { id: 'armor_section', name: 'ARMOR SECTION', cost: 220, buildTime: 18, branch: 'GROUND',
-    units: [{ type: 'M1A2', n: 2 }, { type: 'M2A3', n: 1 }] },
-  { id: 'mech_platoon', name: 'MECH PLATOON', cost: 180, buildTime: 16, branch: 'GROUND',
-    units: [{ type: 'M2A3', n: 2 }, { type: 'RIFLE', n: 2 }] },
-  { id: 'recon_team', name: 'RECON TEAM', cost: 120, buildTime: 12, branch: 'GROUND',
-    units: [{ type: 'M1127', n: 2 }, { type: 'RIFLE', n: 1 }] },
-  { id: 'spg_battery', name: 'SPG BATTERY', cost: 260, buildTime: 20, branch: 'GROUND',
-    units: [{ type: 'M109A7', n: 2 }] },
-  { id: 'air_patrol', name: 'AIR PATROL', cost: 280, buildTime: 22, branch: 'AIR',
-    units: [{ type: 'F16C', n: 1 }] },
-  { id: 'cas_flight', name: 'CAS FLIGHT', cost: 240, buildTime: 20, branch: 'AIR',
-    units: [{ type: 'A10C', n: 1 }] },
-  { id: 'patrol_craft', name: 'PATROL CRAFT', cost: 200, buildTime: 18, branch: 'NAVAL',
-    units: [{ type: 'PATROL', n: 2 }] },
-  { id: 'frigate_section', name: 'FRIGATE SECTION', cost: 320, buildTime: 26, branch: 'NAVAL',
-    units: [{ type: 'FRIGATE', n: 1 }] },
-];
-
-// ── MP unit definitions (server-authoritative, simplified) ──
-// These mirror the single-player defs but only carry sim-relevant fields.
-
-export interface MPUnitDef {
-  type: string;
-  name: string;
-  shortName: string;
-  branch: 'GROUND' | 'AIR' | 'NAVAL';
-  hp: number;
-  speed: number;          // m/s
-  vision: number;         // m
-  range: number;          // m
-  minRange: number;       // m
-  damage: number;
-  reload: number;         // sec
-  burst: number;
-  ammo: number;
-  accuracy: number;       // 0..1
-  canHitAir: boolean;
-  isAir: boolean;
-  isShip: boolean;
-  bounty: number;         // ink paid to killer
-  spawnCost: number;      // ink cost if spawned standalone
-  // visual
-  length: number;
-  width: number;
-  kind: string;           // for HUD grouping
-}
-
-export const MP_UNIT_DEFS: Record<string, MPUnitDef> = {
-  M1A2:    { type: 'M1A2',    name: 'M1A2 ABRAMS',     shortName: 'MBT',  branch: 'GROUND', hp: 680, speed: 14, vision: 800, range: 380, minRange: 0, damage: 180, reload: 4.2, burst: 1, ammo: 30, accuracy: 0.85, canHitAir: false, isAir: false, isShip: false, bounty: 90, spawnCost: 90, length: 9.8, width: 3.6, kind: 'MBT' },
-  M2A3:    { type: 'M2A3',    name: 'M2A3 BRADLEY',    shortName: 'IFV',  branch: 'GROUND', hp: 320, speed: 16, vision: 760, range: 280, minRange: 0, damage: 55,  reload: 1.8, burst: 3, ammo: 60, accuracy: 0.65, canHitAir: true,  isAir: false, isShip: false, bounty: 50, spawnCost: 60, length: 6.5, width: 3.2, kind: 'IFV' },
-  M109A7:  { type: 'M109A7',  name: 'M109A7 PALADIN',  shortName: 'SPG',  branch: 'GROUND', hp: 240, speed: 12, vision: 600, range: 1400, minRange: 200, damage: 140, reload: 9.0, burst: 1, ammo: 20, accuracy: 0.75, canHitAir: false, isAir: false, isShip: false, bounty: 70, spawnCost: 80, length: 9.3, width: 3.4, kind: 'SPG' },
-  M1127:   { type: 'M1127',   name: 'M1127 STRYKER',   shortName: 'REC',  branch: 'GROUND', hp: 220, speed: 22, vision: 920, range: 240, minRange: 0, damage: 35,  reload: 1.5, burst: 3, ammo: 60, accuracy: 0.55, canHitAir: false, isAir: false, isShip: false, bounty: 35, spawnCost: 45, length: 6.9, width: 2.7, kind: 'REC' },
-  RIFLE:   { type: 'RIFLE',   name: 'RIFLE SQUAD',     shortName: 'INF',  branch: 'GROUND', hp: 120, speed: 9,  vision: 540, range: 180, minRange: 0, damage: 22,  reload: 1.0, burst: 5, ammo: 999, accuracy: 0.45, canHitAir: false, isAir: false, isShip: false, bounty: 20, spawnCost: 30, length: 4.0, width: 2.0, kind: 'INF' },
-  F16C:    { type: 'F16C',    name: 'F-16C FIGHTING FALCON', shortName: 'AIR', branch: 'AIR', hp: 100, speed: 90, vision: 1400, range: 1200, minRange: 0, damage: 220, reload: 6.0, burst: 1, ammo: 4, accuracy: 0.85, canHitAir: true, isAir: true, isShip: false, bounty: 110, spawnCost: 130, length: 15.0, width: 9.0, kind: 'AIR' },
-  A10C:    { type: 'A10C',    name: 'A-10C THUNDERBOLT',     shortName: 'CAS', branch: 'AIR', hp: 180, speed: 60, vision: 1100, range: 600,  minRange: 0, damage: 180, reload: 5.0, burst: 2, ammo: 6, accuracy: 0.78, canHitAir: false, isAir: true, isShip: false, bounty: 100, spawnCost: 120, length: 16.3, width: 17.5, kind: 'AIR' },
-  PATROL:  { type: 'PATROL',  name: 'PATROL CRAFT',    shortName: 'PAT',  branch: 'NAVAL', hp: 280, speed: 18, vision: 900, range: 320, minRange: 0, damage: 30,  reload: 1.6, burst: 4, ammo: 999, accuracy: 0.55, canHitAir: true,  isAir: false, isShip: true, bounty: 50, spawnCost: 90, length: 30, width: 6, kind: 'NAVAL' },
-  FRIGATE: { type: 'FRIGATE', name: 'FRIGATE',         shortName: 'FFG',  branch: 'NAVAL', hp: 1400, speed: 14, vision: 1300, range: 900, minRange: 80, damage: 110, reload: 4.0, burst: 2, ammo: 999, accuracy: 0.7, canHitAir: true,  isAir: false, isShip: true, bounty: 180, spawnCost: 220, length: 110, width: 13, kind: 'NAVAL' },
-};
-
-// ── Maps ──
-// Each map defines spawn anchors for each team and the sector layout.
-
-export interface MPMapDef {
-  id: MapId;
-  name: string;
-  worldW: number;
-  worldH: number;
-  blackSpawn: { x: number; y: number };
-  graySpawn:  { x: number; y: number };
-  sectors: { id: string; name: string; x: number; y: number; income: number; radius: number }[];
-  description: string;
-}
-
-export const MP_MAPS: Record<MapId, MPMapDef> = {
+export const MP_MAP_SEEDS: Record<MapId, { name: string; seed: number; description: string }> = {
   COASTAL_THEATER: {
-    id: 'COASTAL_THEATER', name: 'COASTAL THEATER',
-    worldW: 8000, worldH: 6000,
-    blackSpawn: { x: 1300, y: 1300 }, graySpawn: { x: 6700, y: 4700 },
-    sectors: [
-      { id: 'NORTH_PASS', name: 'NORTH PASS', x: 4000, y: 1500, income: 1.2, radius: 280 },
-      { id: 'PORT_ALPHA', name: 'PORT ALPHA', x: 2200, y: 4200, income: 1.5, radius: 320 },
-      { id: 'AIRSTRIP',   name: 'AIRSTRIP',   x: 5800, y: 1800, income: 1.5, radius: 320 },
-      { id: 'CROSSROADS', name: 'CROSSROADS', x: 4000, y: 3000, income: 1.0, radius: 260 },
-      { id: 'SOUTH_BAY',  name: 'SOUTH BAY',  x: 5500, y: 4800, income: 1.2, radius: 280 },
-    ],
-    description: 'A 8×6 km coastal strip with two anchor ports and a central crossroads. Balanced for combined arms.',
+    name: 'AZURE COAST',
+    seed: 3368,
+    description: 'The original theatre — a port city, the ground that pays, the sky above it, the bay below it.',
   },
   INTERIOR_PLAINS: {
-    id: 'INTERIOR_PLAINS', name: 'INTERIOR PLAINS',
-    worldW: 8000, worldH: 6000,
-    blackSpawn: { x: 1300, y: 3000 }, graySpawn: { x: 6700, y: 3000 },
-    sectors: [
-      { id: 'WEST_RIDGE', name: 'WEST RIDGE', x: 2400, y: 2200, income: 1.4, radius: 320 },
-      { id: 'WEST_TOWN',  name: 'WEST TOWN',  x: 2400, y: 3800, income: 1.0, radius: 260 },
-      { id: 'CENTER',     name: 'CENTER',     x: 4000, y: 3000, income: 1.6, radius: 360 },
-      { id: 'EAST_TOWN',  name: 'EAST TOWN',  x: 5600, y: 2200, income: 1.0, radius: 260 },
-      { id: 'EAST_RIDGE', name: 'EAST RIDGE', x: 5600, y: 3800, income: 1.4, radius: 320 },
-    ],
-    description: 'Open plains favoring armor and maneuver warfare. West and east ridge lines dominate the center.',
+    name: 'STEPPE INTERIOR',
+    seed: 7211,
+    description: 'A different seed of the same generator — open interior with ridge lines and crossroads.',
   },
   ARCHIPELAGO: {
-    id: 'ARCHIPELAGO', name: 'ARCHIPELAGO',
-    worldW: 8000, worldH: 6000,
-    blackSpawn: { x: 1300, y: 4700 }, graySpawn: { x: 6700, y: 1300 },
-    sectors: [
-      { id: 'NORTH_HARBOR', name: 'NORTH HARBOR', x: 4000, y: 1200, income: 1.8, radius: 340 },
-      { id: 'ISL_CENTER',   name: 'CENTER ISLAND', x: 4000, y: 3000, income: 1.4, radius: 300 },
-      { id: 'SOUTH_HARBOR', name: 'SOUTH HARBOR', x: 4000, y: 4800, income: 1.8, radius: 340 },
-      { id: 'WEST_ATOLL',   name: 'WEST ATOLL',   x: 2200, y: 3000, income: 1.0, radius: 240 },
-      { id: 'EAST_ATOLL',   name: 'EAST ATOLL',   x: 5800, y: 3000, income: 1.0, radius: 240 },
-    ],
-    description: 'Naval-dominant island chains. Surface combatants rule; ground forces hold the islands.',
+    name: 'BROKEN COAST',
+    seed: 9417,
+    description: 'A coastal seed emphasising naval lanes and island approaches.',
   },
 };

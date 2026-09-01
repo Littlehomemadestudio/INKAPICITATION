@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useMultiplayer } from '@/game/net/client/useMultiplayer';
-import { MP_MAPS, GameMode, MapId } from '@/game/net/protocol';
+import { MP_MAP_SEEDS, GameMode, MapId } from '@/game/net/protocol';
 
 export function MultiplayerMenu() {
   const { state, send } = useMultiplayer();
@@ -124,14 +124,14 @@ export function MultiplayerMenu() {
         <div className="mp-form-row">
           <label className="mp-input-label">THEATER</label>
           <div className="mp-segment" style={{ display: 'flex', width: '100%' }}>
-            {Object.values(MP_MAPS).map(m => (
-              <button key={m.id} style={{ flex: 1 }} className={map === m.id ? 'is-active' : ''} onClick={() => setMap(m.id)}>
-                {m.name.replace(' ', ' ')}
+            {(Object.keys(MP_MAP_SEEDS) as MapId[]).map(id => (
+              <button key={id} style={{ flex: 1 }} className={map === id ? 'is-active' : ''} onClick={() => setMap(id)}>
+                {MP_MAP_SEEDS[id].name}
               </button>
             ))}
           </div>
           <div style={{ fontSize: 9, color: 'var(--ps-faint)', marginTop: 6, lineHeight: 1.5 }}>
-            {MP_MAPS[map].description}
+            {MP_MAP_SEEDS[map].description}
           </div>
         </div>
 

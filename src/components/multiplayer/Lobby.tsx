@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useMultiplayer } from '@/game/net/client/useMultiplayer';
-import { MP_MAPS, Team, GameMode, MapId } from '@/game/net/protocol';
+import { MP_MAP_SEEDS, Team, GameMode, MapId } from '@/game/net/protocol';
 
 export function Lobby() {
   const { state, send } = useMultiplayer();
@@ -16,7 +16,7 @@ export function Lobby() {
   const humans = lobby.players.filter(p => !p.isAI);
   const allReady = humans.every(p => p.status === 'READY');
   const cfg = lobby.config;
-  const mapDef = MP_MAPS[cfg.map];
+  const mapDef = MP_MAP_SEEDS[cfg.map];
 
   const setTeam = (team: Team) => send({ type: 'SET_TEAM', team });
   const setReady = (ready: boolean) => send({ type: 'SET_READY', ready });
@@ -156,7 +156,7 @@ export function Lobby() {
             <span className="mp-config-label">THEATER</span>
             {isHost ? (
               <HostConfigSelect value={cfg.map} onChange={v => send({ type: 'HOST_UPDATE_CONFIG', config: { map: v as MapId } })}>
-                {Object.values(MP_MAPS).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                {(Object.keys(MP_MAP_SEEDS) as MapId[]).map(id => <option key={id} value={id}>{MP_MAP_SEEDS[id].name}</option>)}
               </HostConfigSelect>
             ) : (
               <span className="mp-config-value">{mapDef.name}</span>

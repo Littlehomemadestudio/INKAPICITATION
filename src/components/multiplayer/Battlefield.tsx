@@ -1,10 +1,16 @@
 'use client';
 
 // ─────────────────────────────────────────────────────────────
-// PAPER STORM · Multiplayer Battlefield (REAL ENGINE)
-// Uses the actual Game class, Renderer, TerrainRenderer, unit
-// drawing functions, effects, and HUD — identical to single-player.
-// The only difference: sim runs on the server, client syncs snapshots.
+// PAPER STORM · Multiplayer Battlefield (REAL ENGINE — FULL PARITY)
+// This is the SAME game as single-player — same Game class, same
+// Renderer, same TerrainRenderer, same unit drawing, same effects,
+// same HUD (TopBar, BottomBar, CommsFeed, Arsenal), same arsenal,
+// same battalion roster (FRIEND_BATTALIONS), same deploy panel.
+//
+// The ONLY difference: the simulation runs on the server, not the
+// client. Commands are sent to the server; snapshots are applied
+// via syncFromSnapshot(). Everything the player sees and touches is
+// identical to single-player.
 // ─────────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -14,7 +20,7 @@ import { TopBar, BottomBar, CommsFeed, CursorModeChip } from '@/components/game/
 import { EndOverlay } from '@/components/game/hud/Overlays';
 import { Arsenal } from '@/components/game/hud/Arsenal';
 import { useMultiplayer, connectionQuality } from '@/game/net/client/useMultiplayer';
-import { MP_BATTALIONS, CommandPayload } from '@/game/net/protocol';
+import type { CommandPayload } from '@/game/net/protocol';
 import { NetworkIndicator } from './NetworkIndicator';
 import Link from 'next/link';
 
@@ -98,7 +104,6 @@ export function Battlefield() {
   }, [hud?.result]);
 
   const restart = useCallback(() => {
-    // In MP, "restart" means return to lobby
     setAarDismissed(false);
     setAar(null);
   }, []);
@@ -146,34 +151,32 @@ export function Battlefield() {
         onPause={() => gameRef.current?.setPaused(!gameRef.current?.paused)}
       />
 
-      {/* MP-specific top-right overlay: network status + leave */}
+      {/* MP-specific top-right overlay: network status + exit.
+          This is the ONLY thing added beyond the single-player HUD.
+          It coexists with the real HUD — does not replace it. */}
       <div className="absolute top-2.5 right-3 z-30 flex items-center gap-3 pointer-events-auto">
         <NetworkIndicator quality={quality} ping={state.ping} status={state.status} />
         <button
           className="ps-btn"
           style={{ fontSize: 9, padding: '3px 8px' }}
-          onClick={() => {
-            // Leave match — go back to landing
-            window.location.href = '/';
-          }}
+          onClick={() => { window.location.href = '/'; }}
         >
           EXIT
         </button>
       </div>
 
+      {/* The real BottomBar — includes the deploy panel with the
+          full FRIEND_BATTALIONS roster, same as single-player.
+          No MPDeployBar, no simplified roster. */}
       <BottomBar hud={hud} minimapRef={minimapRef} gameRef={gameRef} />
 
       <CommsFeed hud={hud} />
       <CursorModeChip hud={hud} />
 
-      {/* arsenal — uses the real Arsenal component */}
+      {/* The real Arsenal — same component as single-player, reads
+          hud.battalions which is FRIEND_BATTALIONS in both modes. */}
       {!hud?.result && hud?.arsenalOpen && (
         <Arsenal hud={hud} gameRef={gameRef} />
-      )}
-
-      {/* MP battalion deploy bar — replaces the SP deploy panel with MP roster */}
-      {!booting && !hud?.result && hud?.running && (
-        <MPDeployBar hud={hud} gameRef={gameRef} />
       )}
 
       {/* paused veil */}
@@ -197,69 +200,6 @@ export function Battlefield() {
           </Link>
         </div>
       )}
-    </div>
-  );
-}
-
-// ── MP Deploy Bar ───────────────────────────────────────────
-// Replaces the single-player deploy panel with the MP battalion roster.
-// Uses the same visual language as the SP arsenal.
-
-import { useRef as useReactRef, type MutableRefObject } from 'react';
-import type { Game } from '@/game/Game';
-
-function MPDeployBar({ hud, gameRef }: {
-  hud: HudSnapshot | null;
-  gameRef: MutableRefObject<Game | null>;
-}) {
-  const ink = hud?.ink ?? 0;
-  const scrollRef = useReactRef<HTMLDivElement | null>(null);
-
-  return (
-    <div
-      className="absolute left-1/2 -translate-x-1/2 z-20 pointer-events-auto"
-      style={{ bottom: 'calc(var(--ps-h-bottom) + 8px)' }}
-    >
-      <div
-        ref={scrollRef}
-        className="flex gap-1 bg-[#12110e] border border-[#36322a] p-1.5 ps-scroll overflow-x-auto"
-        style={{ maxWidth: '70vw' }}
-      >
-        {MP_BATTALIONS.map(b => {
-          const affordable = ink >= b.cost;
-          return (
-            <button
-              key={b.id}
-              className="ps-deploy-btn"
-              disabled={!affordable}
-              onClick={() => gameRef.current?.queueBattalion(b.id)}
-              style={{ minWidth: 92 }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[9px] tracking-[0.08em] text-[#d9d6cc]" style={{ textTransform: 'uppercase' }}>
-                  {b.name}
-                </span>
-              </div>
-              <div className="flex items-center gap-1 mt-1">
-                <span
-                  aria-hidden
-                  className="inline-block"
-                  style={{
-                    width: 7, height: 8,
-                    background: '#f3f1ea',
-                    clipPath: 'polygon(50% 0%, 100% 62%, 78% 100%, 22% 100%, 0% 62%)',
-                    opacity: affordable ? 1 : 0.3,
-                  }}
-                />
-                <span className="font-mono text-[9px] text-[#8d887b]">{b.cost}</span>
-                <span className="ml-auto ps-kind-chip" data-k={b.branch === 'AIR' ? 'AIR' : b.branch === 'NAVAL' ? 'SEA' : 'GROUND'}>
-                  {b.branch === 'AIR' ? 'AIR' : b.branch === 'NAVAL' ? 'SEA' : 'GRD'}
-                </span>
-              </div>
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 }

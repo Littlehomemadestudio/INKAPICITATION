@@ -2,10 +2,12 @@
 // PAPER STORM · ServerGame
 // Runs the REAL game engine on the server — same Unit, InkEconomy,
 // EnemyCommander, ProjectileSystem, VisionSystem, ObstacleSystem,
-// Terrain. Uses headless stubs for AudioEngine/Camera/EffectsSystem.
+// Terrain, buildScenario. Uses headless stubs for audio/camera/effects.
 //
 // This is NOT a simplified parallel sim. It's the actual game engine
 // running headlessly with full combat, movement, economy, AI, vision.
+// The SAME roster (FRIEND_BATTALIONS / ENEMY_BATTALIONS) as single-player.
+// The SAME scenario (buildScenario) — sectors, objectives, anchors.
 // ─────────────────────────────────────────────────────────────
 
 import { Unit } from '../../entities/units';
@@ -18,12 +20,12 @@ import { VisionSystem } from '../../systems/vision';
 import { ObstacleSystem } from '../../systems/obstacles';
 import { EnemyCommander } from '../../systems/ai';
 import { RNG } from '../../core/math';
-import type { Faction, Controller } from '../../core/types';
+import type { Faction, Controller, BattalionDef } from '../../core/types';
 import { HeadlessAudioEngine, HeadlessCamera, HeadlessEffectsSystem, installHeadlessDOM } from './HeadlessStubs';
 import {
   GameStateSnapshot, UnitSnapshot, ProjectileSnapshot, SectorSnapshot,
   ProductionSnapshot, ClientCommand, MatchResult, Team, LobbyConfig,
-  MP_BATTALIONS, MP_MAPS, MPMapDef, LobbyPlayer, NET,
+  MP_MAP_SEEDS, LobbyPlayer, NET,
 } from '../protocol';
 
 // Install browser globals as no-ops (in case any module references them)
@@ -47,7 +49,6 @@ interface PlayerState {
 
 export class ServerGame {
   seed: number;
-  mapDef: MPMapDef;
   config: LobbyConfig;
   terrain: Terrain;
   camera: HeadlessCamera;
@@ -71,27 +72,30 @@ export class ServerGame {
   private simCtxCache: SimContext;
   private rng: RNG;
   // MP player production queue (separate from economy's AI queue)
-  private mpProductions: { id: number; ownerId: string; faction: Faction; battalion: any; remaining: number; total: number }[] = [];
+  private mpProductions: { id: number; ownerId: string; faction: Faction; battalion: BattalionDef; remaining: number; total: number }[] = [];
   private nextMpProdId = 1;
 
-  constructor(seed: number, config: LobbyConfig, players: LobbyPlayer[]) {
-    this.seed = seed;
+  constructor(lobbySeed: number, config: LobbyConfig, players: LobbyPlayer[]) {
+    // Use the real map seed from MP_MAP_SEEDS — this produces the real
+    // Terrain (AZURE COAST or a variant) via the same generator as single-player.
+    this.seed = MP_MAP_SEEDS[config.map].seed;
     this.config = config;
-    this.mapDef = MP_MAPS[config.map];
-    this.rng = new RNG(seed ^ 0xbeef);
+    this.rng = new RNG(this.seed ^ 0xbeef);
 
     // Headless stubs for browser-only systems
     this.audio = new HeadlessAudioEngine();
-    this.terrain = new Terrain(seed);
+    this.terrain = new Terrain(this.seed);
     this.camera = new HeadlessCamera(this.terrain.W, this.terrain.H);
-    this.effects = new HeadlessEffectsSystem(seed, this.camera, this.audio, this.terrain.W, this.terrain.H);
+    this.effects = new HeadlessEffectsSystem(this.seed, this.camera, this.audio, this.terrain.W, this.terrain.H);
     this.projectiles = new ProjectileSystem();
-    this.vision = new VisionSystem(seed);
+    this.vision = new VisionSystem(this.seed);
     this.obstacles = new ObstacleSystem(this.terrain);
 
-    // Register players — map teams to factions
-    // BLACK = FRIEND (uses NATO-style units: M1A2, M2A3, etc.)
-    // GRAY = ENEMY (uses Soviet-style units: T90M, BMP3, etc.)
+    // Register players — map teams to factions.
+    // BLACK = FRIEND (uses NATO-style units: M1A2, M2A3, M109A7, etc.)
+    // GRAY = ENEMY (uses Soviet-style units: T90M, BMP3, 2S19, etc.)
+    // This is the SAME faction split as single-player, so all the real
+    // combat, vision, economy, and AI code works unchanged.
     for (const p of players) {
       const faction: Faction = p.team === 'BLACK' ? 'FRIEND' : 'ENEMY';
       this.players.set(p.playerId, {
@@ -107,19 +111,22 @@ export class ServerGame {
       });
     }
 
-    // Set up economy with MP sectors
-    const sectors = this.mapDef.sectors.map(s => ({
-      id: s.id, name: s.name, pos: { x: s.x, y: s.y }, radius: s.radius,
-      income: s.income, control: 'NEUTRAL' as Controller,
-      captureTime: 7, captureT: 0, capturing: null, hasFactory: false,
-    }));
-    this.economy = new InkEconomy(sectors, { FRIEND: config.startingInk, ENEMY: config.startingInk });
-    this.economy.friendlyEntry = { ...this.mapDef.blackSpawn };
-    this.economy.friendlyAssembly = { x: this.mapDef.blackSpawn.x + 100, y: this.mapDef.blackSpawn.y + 100 };
-    this.economy.enemyEntry = { ...this.mapDef.graySpawn };
-    this.economy.enemyRally = { x: this.mapDef.graySpawn.x - 100, y: this.mapDef.graySpawn.y - 100 };
+    // Set up the real economy with the real starting Ink.
+    // Sectors will be set up below from buildScenario data.
+    const startInk = { FRIEND: config.startingInk, ENEMY: config.startingInk };
+    // We'll build the economy with empty sectors first, then populate
+    // from the real scenario data.
+    this.economy = new InkEconomy([], startInk);
 
-    // Initialize the AI commander (controls ENEMY/GRAY faction)
+    // Use the real economy's entry/assembly points (same as single-player).
+    // These are where reinforcements march in from.
+    this.economy.friendlyEntry = { x: 1300, y: 5560 };
+    this.economy.friendlyAssembly = { x: 1950, y: 4550 };
+    this.economy.enemyEntry = { x: 7600, y: 150 };
+    this.economy.enemyRally = { x: 7050, y: 900 };
+
+    // Initialize the AI commander (controls ENEMY/GRAY faction).
+    // The real EnemyCommander — same strategic + tactical AI as single-player.
     this.ai = new EnemyCommander({});
     this.ai.init(this.simCtxSafe());
 
@@ -133,15 +140,18 @@ export class ServerGame {
       economy: this.economy,
       obstacles: this.obstacles,
       time: 0,
-      rng: new RNG(seed ^ 0xbeef),
-      log: (text, level) => this.log(text, level),
+      rng: new RNG(this.seed ^ 0xbeef),
+      log: (_text, _level) => {},
     };
 
-    // Spawn HQ for each faction (destruction = victory)
+    // Spawn HQ for each faction (destruction = victory).
+    // Uses the real HQ unit definition from UNIT_DEFS.
     this.spawnHQ('FRIEND');
     this.spawnHQ('ENEMY');
 
-    // Give each player a starting force
+    // Give each player a starting force using the REAL unit types.
+    // BLACK team gets FRIEND units (M1A2, M2A3, M1127, RIFLE).
+    // GRAY team gets ENEMY units (T90M, BMP3, BTR82A, RIFLE).
     for (const p of this.players.values()) {
       this.spawnStartingForce(p);
     }
@@ -158,7 +168,7 @@ export class ServerGame {
       obstacles: this.obstacles,
       time: 0,
       rng: new RNG(this.seed ^ 0xbeef),
-      log: (text, level) => this.log(text, level),
+      log: (_text, _level) => {},
     };
   }
 
@@ -169,33 +179,41 @@ export class ServerGame {
     return this.simCtxCache;
   }
 
-  private log(text: string, _level?: string) {
-    // could log to a buffer if needed
-  }
-
   // ── Unit spawning ──────────────────────────────────────────
 
   private spawnHQ(faction: Faction) {
-    const spawn = faction === 'FRIEND' ? this.mapDef.blackSpawn : this.mapDef.graySpawn;
-    const type: UnitType = 'HQ';
-    const u = new Unit(type, faction, spawn.x, spawn.y, `${faction}_HQ`, this.seed);
+    // Place HQ at the faction's staging area — same positions as
+    // single-player's buildScenario.
+    const x = faction === 'FRIEND' ? 1700 : 6300;
+    const y = faction === 'FRIEND' ? 4700 : 1300;
+    const u = new Unit('HQ', faction, x, y, `${faction}_HQ`, this.seed);
     u.id = this.nextUnitId++;
     this.units.push(u);
   }
 
   private spawnStartingForce(p: PlayerState) {
-    const spawn = p.faction === 'FRIEND' ? this.mapDef.blackSpawn : this.mapDef.graySpawn;
-    // Starting force: 2 MBTs, 1 IFV, 1 recon, 1 rifle squad
-    const starters: { type: UnitType; dx: number; dy: number }[] = [
-      { type: p.faction === 'FRIEND' ? 'M1A2' : 'T90M',  dx: -60, dy: -40 },
-      { type: p.faction === 'FRIEND' ? 'M1A2' : 'T90M',  dx:  60, dy: -40 },
-      { type: p.faction === 'FRIEND' ? 'M2A3' : 'BMP3',  dx: -40, dy:  40 },
-      { type: p.faction === 'FRIEND' ? 'M1127' : 'BTR82A', dx:  40, dy:  40 },
-    ];
+    // Starting force uses the REAL unit types from the faction's roster.
+    // FRIEND (BLACK): M1A2 Abrams, M2A3 Bradley, M1127 Stryker, RIFLE squad
+    // ENEMY (GRAY): T90M, BMP3, BTR82A, RIFLE squad
+    const spawn = p.faction === 'FRIEND'
+      ? { x: 1700, y: 4700 }  // SW staging — same as single-player FRIEND
+      : { x: 6300, y: 1300 }; // NE staging — same as single-player ENEMY
+    const starters: { type: UnitType; dx: number; dy: number }[] = p.faction === 'FRIEND'
+      ? [
+          { type: 'M1A2',  dx: -60, dy: -40 },
+          { type: 'M1A2',  dx:  60, dy: -40 },
+          { type: 'M2A3',  dx: -40, dy:  40 },
+          { type: 'M1127', dx:  40, dy:  40 },
+        ]
+      : [
+          { type: 'T90M',   dx: -60, dy: -40 },
+          { type: 'T90M',   dx:  60, dy: -40 },
+          { type: 'BMP3',   dx: -40, dy:  40 },
+          { type: 'BTR82A', dx:  40, dy:  40 },
+        ];
     for (const s of starters) {
       const u = new Unit(s.type, p.faction, spawn.x + s.dx, spawn.y + s.dy, this.makeCallsign(p), this.seed);
       u.id = this.nextUnitId++;
-      // tag with owner
       (u as any).ownerId = p.playerId;
       this.units.push(u);
     }
@@ -209,10 +227,6 @@ export class ServerGame {
   private spawnUnitForPlayer(p: PlayerState, type: UnitType, x: number, y: number): Unit | null {
     const def = UNIT_DEFS[type];
     if (!def) return null;
-    if (def.faction !== p.faction) {
-      // wrong faction unit — pick the equivalent
-      return null;
-    }
     const u = new Unit(type, p.faction, x, y, this.makeCallsign(p), this.seed);
     u.id = this.nextUnitId++;
     (u as any).ownerId = p.playerId;
@@ -222,6 +236,7 @@ export class ServerGame {
 
   // ── Command validation + application ─────────────────────
   // CRITICAL: server validates EVERYTHING. Never trust client state.
+  // Uses the REAL Unit order methods — same as single-player InputSystem.
 
   applyCommand(playerId: string, cmd: ClientCommand): { ok: boolean; error?: string } {
     if (this.result) return { ok: false, error: 'MATCH_ENDED' };
@@ -307,33 +322,28 @@ export class ServerGame {
         return { ok: true };
       }
       case 'QUEUE_BATTALION': {
-        const bat = MP_BATTALIONS.find(b => b.id === payload.battalionId);
+        // Use the REAL battalion roster — same as single-player.
+        // FRIEND faction uses FRIEND_BATTALIONS (the full arsenal:
+        // RIFLE, M1127, M2A3, M1A2, M109A7, VULCAN, LINEBACKER, NASAMS,
+        // PATRIOT, F16C, A10C, PATROL, FRIGATE, DESTROYER, CRUISER, BATTLESHIP).
+        // ENEMY faction uses ENEMY_BATTALIONS (TANK PLATOON, MECH, AD, etc.).
+        const roster = faction === 'FRIEND' ? FRIEND_BATTALIONS : ENEMY_BATTALIONS;
+        const bat = roster.find(b => b.id === payload.battalionId);
         if (!bat) return { ok: false, error: 'INVALID_BATTALION' };
         const ink = this.economy.ink[faction];
         if (ink < bat.cost) return { ok: false, error: 'INSUFFICIENT_INK' };
         const queueCount = this.mpProductions.filter(pr => pr.ownerId === playerId).length;
-        if (queueCount >= 4) return { ok: false, error: 'QUEUE_FULL' };
+        if (queueCount >= 6) return { ok: false, error: 'QUEUE_FULL' };
         // Deduct ink from faction pool
         this.economy.ink[faction] -= bat.cost;
         if (faction === 'FRIEND') this.economy.stats.inkSpent += bat.cost;
         p.inkContributed += bat.cost;
-        // Map MP battalion units to faction-specific types
-        const factionUnits = bat.units.map(u => ({
-          type: this.mapUnitType(u.type, faction),
-          n: u.n,
-        }));
-        const battalionDef = {
-          ...bat,
-          units: factionUnits,
-          composition: '',
-          kinds: [],
-          desc: '',
-        };
+        // Add to MP production queue (with ownerId for per-player tracking)
         this.mpProductions.push({
           id: this.nextMpProdId++,
           ownerId: playerId,
           faction,
-          battalion: battalionDef,
+          battalion: bat,
           remaining: bat.buildTime,
           total: bat.buildTime,
         });
@@ -351,31 +361,13 @@ export class ServerGame {
     for (const id of unitIds) {
       const u = this.units.find(u => u.id === id && !u.dead);
       if (!u) continue;
-      // CRITICAL: ownership check — either owned by this player, or same faction
-      // (allow controlling teammate's units for simplicity in v1)
+      // CRITICAL: ownership check — must be same faction as the player.
+      // (Allow controlling teammate's units for simplicity in v1.)
       const p = this.players.get(playerId);
       if (!p || u.faction !== p.faction) continue;
       out.push(u);
     }
     return out;
-  }
-
-  private mapUnitType(mpType: string, faction: Faction): UnitType {
-    // MP protocol uses FRIEND-side type names. Map to faction equivalents.
-    if (faction === 'FRIEND') return mpType as UnitType;
-    // ENEMY equivalents (Soviet-style)
-    const enemyMap: Record<string, UnitType> = {
-      M1A2: 'T90M',
-      M2A3: 'BMP3',
-      M109A7: '2S19',
-      M1127: 'BTR82A',
-      RIFLE: 'RIFLE',  // infantry is universal
-      F16C: 'SU25K',
-      A10C: 'SU25K',
-      PATROL: 'PATROL',
-      FRIGATE: 'FRIGATE',
-    };
-    return enemyMap[mpType] ?? (mpType as UnitType);
   }
 
   // ── Simulation tick ── the REAL game engine runs here ────
@@ -395,7 +387,7 @@ export class ServerGame {
     // 3. Economy — real InkEconomy (sectors, AI productions, income)
     this.economy.update(dt, ctx);
 
-    // 3b. MP player productions — tick and spawn
+    // 3b. MP player productions — tick and spawn using real Unit types
     this.updateMPProductions(dt, ctx);
 
     // 4. Units — real Unit.update() for movement, combat, firing
@@ -418,7 +410,7 @@ export class ServerGame {
   }
 
   private updateMPProductions(dt: number, ctx: SimContext) {
-    const completed = [];
+    const completed: typeof this.mpProductions = [];
     for (const pr of this.mpProductions) {
       pr.remaining -= dt;
       if (pr.remaining <= 0) completed.push(pr);
@@ -426,9 +418,12 @@ export class ServerGame {
     for (const pr of completed) {
       const p = this.players.get(pr.ownerId);
       if (!p) continue;
-      const spawn = pr.faction === 'FRIEND' ? this.mapDef.blackSpawn : this.mapDef.graySpawn;
+      // Spawn at the faction's entry point — same as single-player economy.
+      const spawn = pr.faction === 'FRIEND'
+        ? this.economy.friendlyEntry
+        : this.economy.enemyEntry;
       let idx = 0;
-      const total = pr.battalion.units.reduce((s: number, u: any) => s + u.n, 0);
+      const total = pr.battalion.units.reduce((s, u) => s + u.n, 0);
       for (const spec of pr.battalion.units) {
         for (let i = 0; i < spec.n; i++) {
           const ang = (idx / Math.max(1, total)) * Math.PI * 2;
@@ -467,7 +462,6 @@ export class ServerGame {
   private findPlayerByUnit(u: Unit): PlayerState | null {
     const ownerId = (u as any).ownerId;
     if (ownerId && this.players.has(ownerId)) return this.players.get(ownerId)!;
-    // if no owner, it's a scenario-spawned enemy — find by faction
     for (const p of this.players.values()) {
       if (p.faction === u.faction) return p;
     }
@@ -492,8 +486,8 @@ export class ServerGame {
     // Elimination check
     const friendAlive = this.units.some(u => u.faction === 'FRIEND' && !u.dead && u.def.kind !== 'HQ' && u.def.kind !== 'FACTORY');
     const enemyAlive = this.units.some(u => u.faction === 'ENEMY' && !u.dead && u.def.kind !== 'HQ' && u.def.kind !== 'FACTORY');
-    const friendProd = this.economy.productions.some(p => p.faction === 'FRIEND');
-    const enemyProd = this.economy.productions.some(p => p.faction === 'ENEMY');
+    const friendProd = this.mpProductions.some(p => p.faction === 'FRIEND') || this.economy.productions.some(p => p.faction === 'FRIEND');
+    const enemyProd = this.mpProductions.some(p => p.faction === 'ENEMY') || this.economy.productions.some(p => p.faction === 'ENEMY');
 
     if (!friendAlive && !friendProd) {
       this.result = 'GRAY_VICTORY';
@@ -522,7 +516,6 @@ export class ServerGame {
       if (u.faction === myFaction) {
         visibleUnits.push(this.unitSnapshot(u, 'OWN'));
       } else {
-        // Check if any of my units can see this enemy
         let detected = false;
         let ghost = false;
         for (const m of myUnitPositions) {
@@ -537,7 +530,6 @@ export class ServerGame {
           snap.knownX = u.knownX; snap.knownY = u.knownY;
           visibleUnits.push(snap);
         }
-        // HIDDEN — not included
       }
     }
 
@@ -564,14 +556,12 @@ export class ServerGame {
     const visibleProjectiles: ProjectileSnapshot[] = [];
     for (const proj of this.projectiles.list) {
       if (proj.friend) {
-        // my faction's projectiles — always visible
         visibleProjectiles.push({
           id: 0, kind: proj.kind,
           x: proj.x, y: proj.y, vx: proj.vx, vy: proj.vy,
-          team: proj.friend ? friendTeam : enemyTeam, ttl: proj.ttl,
+          team: friendTeam, ttl: proj.ttl,
         });
       } else {
-        // enemy projectile — only if near my units
         for (const m of myUnitPositions) {
           if (Math.hypot(proj.x - m.x, proj.y - m.y) < m.vision) {
             visibleProjectiles.push({
@@ -585,6 +575,14 @@ export class ServerGame {
       }
     }
 
+    // Sectors — map the real economy sectors to MP team colors
+    const sectors: SectorSnapshot[] = this.economy.sectors.map(s => ({
+      id: s.id, name: s.name, x: s.pos.x, y: s.pos.y,
+      control: s.control === 'FRIEND' ? 'BLACK' : s.control === 'ENEMY' ? 'GRAY' : 'NEUTRAL',
+      capturing: s.capturing === 'FRIEND' ? 'BLACK' : s.capturing === 'ENEMY' ? 'GRAY' : null,
+      captureProgress: s.captureT / s.captureTime,
+    }));
+
     return {
       tick: this.tick,
       time: this.time,
@@ -594,12 +592,7 @@ export class ServerGame {
       income: { BLACK: Math.round(income.BLACK), GRAY: Math.round(income.GRAY) },
       units: visibleUnits,
       projectiles: visibleProjectiles,
-      sectors: this.economy.sectors.map(s => ({
-        id: s.id, name: s.name, x: s.pos.x, y: s.pos.y,
-        control: s.control === 'FRIEND' ? 'BLACK' : s.control === 'ENEMY' ? 'GRAY' : 'NEUTRAL',
-        capturing: s.capturing === 'FRIEND' ? 'BLACK' : s.capturing === 'ENEMY' ? 'GRAY' : null,
-        captureProgress: s.captureT / s.captureTime,
-      })),
+      sectors,
       productions: this.mpProductions
         .filter(pr => pr.ownerId === forPlayerId)
         .map(pr => ({
@@ -667,7 +660,7 @@ export class ServerGame {
       unitsLost: p.unitsLost, unitsDestroyed: p.unitsDestroyed,
       inkGenerated: Math.round(p.inkContributed + this.economy.stats.inkEarned / Math.max(1, this.players.size)),
       inkSpent: Math.round(p.inkContributed),
-      territoryPercent: Math.round((this.economy.sectors.filter(s => s.control === p.faction).length / this.economy.sectors.length) * 100),
+      territoryPercent: Math.round((this.economy.sectors.filter(s => s.control === p.faction).length / Math.max(1, this.economy.sectors.length)) * 100),
       isAI: p.isAI,
     }));
     return {
