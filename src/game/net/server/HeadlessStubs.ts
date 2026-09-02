@@ -37,8 +37,17 @@ export class HeadlessAudioEngine {
   shipBreaking(_x: number, _y: number, _length: number) {}
   fireSound(_kind: string, _x: number, _y: number, _calibre?: number) {}
   impactSound(_kind: string, _x: number, _y: number) {}
-  // any other methods called by Unit/Economy/AI — all no-op
-  [key: string]: any; // allow any additional method calls
+  // All additional audio methods called by the game — all no-op on server.
+  // These must match the real AudioEngine's public interface.
+  artilleryFire(_x: number, _y: number, _calibre?: number) {}
+  autocannon(_x: number, _y: number) {}
+  cannon(_x: number, _y: number, _calibre?: number) {}
+  missileLaunch(_x: number, _y: number) {}
+  navalGun(_x: number, _y: number, _calibre?: number) {}
+  whistle(_x: number, _y: number) {}
+  setIntensity(_v: number) {}
+  // Catch-all for any method I missed — returns void for any call
+  [key: string]: any;
 }
 
 // ── Headless Camera ──
@@ -86,12 +95,22 @@ export class HeadlessEffectsSystem {
   audio: any = null;
   terrainW = 0;
   terrainH = 0;
+  // Visual state arrays — empty on server, but present so any code
+  // that reads them (e.g. effects.wrecks.length) doesn't crash.
+  wrecks: any[] = [];
+  shipWrecks: any[] = [];
+  craters: any[] = [];
+  rubble: any[] = [];
+  scars: any = null;
+  orderMarkers: any[] = [];
 
   constructor(_seed: number, _camera: any, _audio: any, terrainW: number, terrainH: number) {
     this.terrainW = terrainW;
     this.terrainH = terrainH;
   }
 
+  // All spawn/stamp/draw methods — no-op on server.
+  // The client generates visual effects from synced unit state.
   spawnExplosion(_x: number, _y: number, _opts?: any) {}
   spawnSmoke(_x: number, _y: number, _opts?: any) {}
   spawnDust(_x: number, _y: number, _vx: number, _vy: number) {}
@@ -104,6 +123,16 @@ export class HeadlessEffectsSystem {
   stampOilSlick(_x: number, _y: number, _radius: number) {}
   addShipWreck(_opts: any) {}
   orderMarker(_x: number, _y: number, _type: string) {}
+  muzzleFlash(_x: number, _y: number, _angle: number, _len: number) {}
+  autoFlash(_x: number, _y: number, _angle: number) {}
+  // Draw methods (called by Renderer — not on server)
+  drawCore() {}
+  drawSmoke() {}
+  drawWakes() {}
+  drawWaterSplashes() {}
+  drawCraters() {}
+  drawRubble() {}
+  drawOrderMarkers() {}
   update(_dt: number) {}
   [key: string]: any;
 }

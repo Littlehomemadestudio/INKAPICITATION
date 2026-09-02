@@ -2,13 +2,23 @@
 
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · NetClient
-// Browser-side socket.io wrapper. Handles connection, reconnection,
-// ping measurement, and message dispatch.
+// Browser-side socket.io wrapper with a clean connection lifecycle.
+//
+// State machine:
+//   DISCONNECTED → CONNECTING → CONNECTED → (RECONNECTING → CONNECTED)* → DISCONNECTED
+//
+// Guarantees:
+//   - Only ONE socket exists at any time
+//   - Event listeners are attached exactly once per socket
+//   - Reconnect attempts are controlled by socket.io's built-in reconnection
+//   - Calling connect() while already connected is a no-op
+//   - Calling connect() while connecting is a no-op
+//   - Calling connect() after a disconnect cleanly disposes the old socket first
 // ─────────────────────────────────────────────────────────────
 
 import { io, Socket } from 'socket.io-client';
 import {
-  LobbyClientMessage, LobbyServerMessage, NET, PlayerProfile,
+  LobbyClientMessage, LobbyServerMessage, NET,
 } from '../protocol';
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING';
@@ -25,90 +35,97 @@ export class NetClient {
   private status: ConnectionStatus = 'DISCONNECTED';
   private ping = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private reconnectAttempts = 0;
-  private lastReconnectToken: string | null = null;
   private disposed = false;
-  // Track if we've been connected before (for reconnect logic)
-  private everConnected = false;
+  private connecting = false; // guards against duplicate connect() calls
 
   constructor(opts: NetClientOptions) {
     this.opts = opts;
   }
 
-  connect(reconnectToken?: string) {
+  /**
+   * Connect to the server. Idempotent — calling while already connected
+   * or while a connection attempt is in progress is a no-op.
+   * If a previous socket exists (disconnected), it is cleaned up first.
+   */
+  connect(reconnectToken?: string): void {
+    // Already connected — nothing to do
     if (this.socket?.connected) return;
-    this.lastReconnectToken = reconnectToken ?? null;
+    // Connection attempt already in progress — don't start a second one
+    if (this.connecting && this.socket) return;
+
+    // Clean up any stale socket first
+    if (this.socket) {
+      this.destroySocket();
+    }
+
     this.disposed = false;
+    this.connecting = true;
     this.setStatus('CONNECTING');
 
-    // CRITICAL: per the fullstack-dev skill gateway rules:
-    // - Must use a RELATIVE connection (same origin, goes through Caddy on :81)
-    // - Must add ?XTransformPort=3030 so Caddy routes to the match-server
-    // - Path must be /socket.io (the default)
-    // Calling io() with no URL uses window.location.origin automatically.
     this.socket = io({
       path: '/socket.io',
-      // Polling only for now — Caddy WebSocket upgrade has issues.
-      // Polling is slower but reliable through the gateway.
+      // Polling only — Caddy WebSocket upgrade is unreliable through the gateway.
       transports: ['polling'],
       upgrade: false,
+      // Socket.io's built-in reconnection handles retry logic.
       reconnection: true,
       reconnectionAttempts: NET.MAX_RECONNECT_ATTEMPTS,
       reconnectionDelay: NET.RECONNECT_BACKOFF_MS[0],
       reconnectionDelayMax: NET.RECONNECT_BACKOFF_MS[NET.RECONNECT_BACKOFF_MS.length - 1],
       auth: reconnectToken ? { reconnectToken } : undefined,
-      // CRITICAL: this is how the gateway routes us to port 3030
+      // CRITICAL: this is how the Caddy gateway routes us to port 3030
       query: { XTransformPort: '3030' },
       timeout: 10000,
     });
 
-    this.socket.on('connect', () => {
-      console.log('[NetClient] ✓ connected, id=', this.socket?.id);
-      this.everConnected = true;
-      this.reconnectAttempts = 0;
+    this.attachListeners();
+  }
+
+  private attachListeners() {
+    const s = this.socket;
+    if (!s) return;
+
+    s.on('connect', () => {
+      this.connecting = false;
       this.setStatus('CONNECTED');
       this.startPingLoop();
     });
 
-    this.socket.on('disconnect', (reason) => {
-      console.log('[NetClient] disconnected:', reason);
+    s.on('disconnect', (reason) => {
       this.stopPingLoop();
       if (this.disposed) {
         this.setStatus('DISCONNECTED');
         return;
       }
-      // If we've been connected before, treat as RECONNECTING
-      if (this.everConnected) {
-        this.setStatus('RECONNECTING');
+      // socket.io will auto-reconnect unless reason is a permanent failure
+      if (reason === 'io server disconnect' || reason === 'io client disconnect') {
+        this.setStatus('DISCONNECTED');
       } else {
-        this.setStatus('CONNECTING');
+        this.setStatus('RECONNECTING');
       }
     });
 
-    this.socket.on('reconnect_attempt', (attempt) => {
-      console.log('[NetClient] reconnect attempt', attempt);
-      this.reconnectAttempts = attempt;
+    s.on('reconnect_attempt', () => {
       this.setStatus('RECONNECTING');
     });
 
-    this.socket.on('reconnect_failed', () => {
-      console.log('[NetClient] reconnect failed');
+    s.on('reconnect_failed', () => {
+      this.connecting = false;
       this.opts.onReconnectFailed();
       this.setStatus('DISCONNECTED');
     });
 
-    this.socket.on('reconnect', () => {
-      console.log('[NetClient] reconnected');
-      this.reconnectAttempts = 0;
+    s.on('reconnect', () => {
       this.setStatus('CONNECTED');
     });
 
-    this.socket.on('msg', (msg: LobbyServerMessage) => {
+    s.on('msg', (msg: LobbyServerMessage) => {
       this.opts.onMessage(msg);
     });
 
-    this.socket.on('connect_error', (err) => {
-      console.warn('[NetClient] connect_error', err.message, err.context || '');
+    s.on('connect_error', (_err) => {
+      // Don't spam console — socket.io retries automatically.
+      // The status is already RECONNECTING from the disconnect handler.
     });
   }
 
@@ -119,14 +136,7 @@ export class NetClient {
       const t0 = Date.now();
       this.socket.emit('ping', () => {
         this.ping = Date.now() - t0;
-        // Re-evaluate status based on ping
-        if (this.ping > 400) {
-          this.opts.onStatusChange('CONNECTED', this.ping);
-          // We don't downgrade to DEGRADED here — that's a UI concern.
-          // The UI layer decides based on ping.
-        } else {
-          this.opts.onStatusChange('CONNECTED', this.ping);
-        }
+        this.opts.onStatusChange('CONNECTED', this.ping);
       });
     }, NET.PING_INTERVAL_MS);
   }
@@ -141,27 +151,32 @@ export class NetClient {
     this.opts.onStatusChange(s, this.ping);
   }
 
-  send(msg: LobbyClientMessage) {
-    if (!this.socket?.connected) {
-      console.warn('[NetClient] cannot send — not connected', msg.type);
-      return false;
-    }
+  /**
+   * Send a message to the server. Returns false if not connected.
+   * Does NOT throw — callers should check the return value.
+   */
+  send(msg: LobbyClientMessage): boolean {
+    if (!this.socket?.connected) return false;
     this.socket.emit('msg', msg);
     return true;
   }
-
-  get connected() { return this.socket?.connected ?? false; }
-  get currentStatus() { return this.status; }
-  get currentPing() { return this.ping; }
-
-  dispose() {
-    this.disposed = true;
+  private destroySocket() {
     this.stopPingLoop();
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
     }
+    this.connecting = false;
+  }
+
+  get connected(): boolean { return this.socket?.connected ?? false; }
+  get currentStatus(): ConnectionStatus { return this.status; }
+  get currentPing(): number { return this.ping; }
+
+  dispose() {
+    this.disposed = true;
+    this.destroySocket();
     this.setStatus('DISCONNECTED');
   }
 }

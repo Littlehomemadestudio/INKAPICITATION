@@ -3,15 +3,27 @@
 // ─────────────────────────────────────────────────────────────
 // PAPER STORM · useMultiplayer hook
 // Single source of truth for multiplayer state on the client.
-// Wraps NetClient, manages lobby/match/snapshot state.
+//
+// Connection lifecycle:
+//   1. On mount: connect with stored playerId as reconnect token
+//   2. On IDENTITY: store playerId, clear reconnecting flag
+//   3. On disconnect: set RECONNECTING, keep lobby state (server may restore it)
+//   4. On reconnect: if server sends RECONNECTED, restore lobby/match state
+//   5. On reconnect with new session (no RECONNECTED): clear stale lobby state
+//
+// Stale state prevention:
+//   - If we receive IDENTITY with a NEW playerId (different from stored),
+//     the server was restarted or our session expired. Clear all lobby/match state.
+//   - If we receive LOBBY_STATE and our myPlayerId is NOT in the lobby's players,
+//     we're seeing someone else's lobby or a stale state — clear it.
 // ─────────────────────────────────────────────────────────────
 
-import { useEffect, useRef, useState, useCallback, useSyncExternalStore } from 'react';
+import { useEffect, useCallback, useSyncExternalStore } from 'react';
 import { NetClient, ConnectionStatus } from './NetClient';
 import {
   LobbyState, LobbyServerMessage, LobbyClientMessage, PlayerProfile,
   ClientCommand, GameStateSnapshot, MatchResultsPayload, MatchPhase,
-  LobbyErrorCode, NET,
+  LobbyErrorCode,
 } from '../protocol';
 
 // ── State shape ─────────────────────────────────────────────
@@ -22,13 +34,10 @@ export interface MultiplayerState {
   profile: PlayerProfile | null;
   phase: MatchPhase;
   lobby: LobbyState | null;
-  // Match state
   latestSnapshot: GameStateSnapshot | null;
   results: MatchResultsPayload | null;
-  // UI feedback
   error: { code: LobbyErrorCode; message: string } | null;
   info: string | null;
-  // Quick match search
   quickMatch: {
     searching: boolean;
     searchId: string | null;
@@ -36,13 +45,8 @@ export interface MultiplayerState {
     playersNeeded: number;
     elapsedSec: number;
   } | null;
-  // Countdown
   countdownEndsAt: number | null;
-  // Reconnect
   reconnecting: boolean;
-  // Authoritative local player ID — set from IDENTITY and LOBBY_JOINED.
-  // Always available once the server has acknowledged us, even if profile
-  // hasn't fully propagated yet.
   myPlayerId: string | null;
 }
 
@@ -62,15 +66,19 @@ const INITIAL_STATE: MultiplayerState = {
   reconnecting: false,
 };
 
-// ── Simple external store (avoids react-router dependency) ──
+const STORAGE_KEY = 'ps_mp_player_id';
+
+// ── MPStore ─────────────────────────────────────────────────
 
 class MPStore {
   private state: MultiplayerState = { ...INITIAL_STATE };
   private listeners = new Set<() => void>();
   private client: NetClient | null = null;
-  private snapshotBuffer: GameStateSnapshot[] = [];
+  private storedPlayerId: string | null = null;
+  private infoTimeout: ReturnType<typeof setTimeout> | null = null;
+  private errorTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  getState = () => this.state;
+  getState = (): MultiplayerState => this.state;
 
   subscribe = (cb: () => void) => {
     this.listeners.add(cb);
@@ -82,111 +90,176 @@ class MPStore {
     for (const l of this.listeners) l();
   }
 
-  init(): NetClient {
+  // ── Connection ───────────────────────────────────────────
+
+  private ensureClient(): NetClient {
     if (this.client) return this.client;
     this.client = new NetClient({
       onMessage: (msg) => this.handleMessage(msg),
-      onStatusChange: (status, ping) => this.set({ status, ping }),
-      onReconnectFailed: () => this.set({
-        error: { code: 'SERVER_ERROR', message: 'CANNOT REACH MATCH SERVER' },
-        reconnecting: false,
-      }),
+      onStatusChange: (status, ping) => {
+        if (status === 'RECONNECTING') {
+          this.set({ status, ping, reconnecting: true });
+        } else if (status === 'DISCONNECTED') {
+          // Permanent disconnect — clear reconnecting, keep lobby state
+          // (the user can still see the lobby they were in)
+          this.set({ status, ping, reconnecting: false });
+        } else {
+          this.set({ status, ping });
+        }
+      },
+      onReconnectFailed: () => {
+        // Socket.io gave up reconnecting. Show error, clear reconnecting.
+        this.set({
+          error: { code: 'SERVER_ERROR', message: 'CANNOT REACH MATCH SERVER' },
+          reconnecting: false,
+        });
+      },
     });
     return this.client;
   }
 
-  connect(reconnectToken?: string) {
-    const c = this.init();
-    // If we have a stored playerId from a previous session, use it as
-    // the reconnect token so the server can restore our identity.
-    // This prevents getting a new playerId on every reconnection.
-    const storedToken = reconnectToken ?? this.storedReconnectToken ?? this.loadStoredToken();
-    // Don't set reconnecting=true here — only set it if the socket actually
-    // disconnects and retries. The first connect is a fresh connection.
-    c.connect(storedToken);
+  connect(): void {
+    const c = this.ensureClient();
+    const token = this.loadStoredToken();
+    c.connect(token ?? undefined);
   }
-
-  private storedReconnectToken: string | null = null;
 
   private loadStoredToken(): string | null {
     if (typeof window === 'undefined') return null;
     try {
-      return localStorage.getItem('ps_mp_player_id') || null;
+      const id = localStorage.getItem(STORAGE_KEY);
+      this.storedPlayerId = id;
+      return id;
     } catch {
       return null;
     }
   }
 
-  private saveStoredToken(id: string | null) {
+  private saveStoredToken(id: string): void {
+    this.storedPlayerId = id;
     if (typeof window === 'undefined') return;
     try {
-      if (id) localStorage.setItem('ps_mp_player_id', id);
-      else localStorage.removeItem('ps_mp_player_id');
+      localStorage.setItem(STORAGE_KEY, id);
     } catch {
       // ignore
     }
   }
 
-  send(msg: LobbyClientMessage) {
+  private clearStoredToken(): void {
+    this.storedPlayerId = null;
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
+  // ── Send ─────────────────────────────────────────────────
+
+  send(msg: LobbyClientMessage): boolean {
     if (!this.client) return false;
     return this.client.send(msg);
+  }
+
+  sendCommand(command: ClientCommand): boolean {
+    return this.send({ type: 'SEND_COMMAND', command });
   }
 
   // ── Message handler ──────────────────────────────────────
 
   private handleMessage(msg: LobbyServerMessage) {
     switch (msg.type) {
-      case 'IDENTITY':
-        // Set both profile and myPlayerId — myPlayerId is the authoritative
-        // id used for lobby lookups, available immediately.
-        // Clear reconnecting — we have a valid identity now.
+      case 'IDENTITY': {
+        const newId = msg.profile.playerId;
+        const hadOldId = this.storedPlayerId && this.storedPlayerId !== newId;
+        // If the server gave us a different ID than what we stored,
+        // the server was restarted or our session expired.
+        // Clear all stale lobby/match state.
+        if (hadOldId) {
+          this.set({
+            ...INITIAL_STATE,
+            status: this.state.status,
+            ping: this.state.ping,
+            profile: msg.profile,
+            myPlayerId: newId,
+            reconnecting: false,
+          });
+        } else {
+          this.set({
+            profile: msg.profile,
+            myPlayerId: newId,
+            reconnecting: false,
+          });
+        }
+        this.saveStoredToken(newId);
+        break;
+      }
+
+      case 'RECONNECTED': {
+        // Server confirmed our session is restored.
         this.set({
-          profile: msg.profile,
-          myPlayerId: msg.profile.playerId,
           reconnecting: false,
+          lobby: msg.lobby,
+          latestSnapshot: msg.snapshot ?? null,
+          phase: msg.snapshot ? 'IN_MATCH' :
+                 msg.lobby.status === 'IN_MATCH' ? 'IN_MATCH' : 'LOBBY',
+          info: 'RECONNECTED',
         });
-        // Store the playerId as the reconnect token so we can resume
-        // the same identity if the socket reconnects (ping timeout, etc.)
-        this.storedReconnectToken = msg.profile.playerId;
-        this.saveStoredToken(msg.profile.playerId);
+        this.queueInfoClear('RECONNECTED', 3000);
         break;
+      }
 
-      case 'LOBBY_JOINED':
-        // LOBBY_JOINED carries yourPlayerId — use it as a fallback in case
-        // IDENTITY hasn't been processed yet (race condition on join).
+      case 'LOBBY_JOINED': {
+        const myId = msg.yourPlayerId ?? this.state.myPlayerId;
+        // Verify our player is actually in the lobby roster
+        const amInLobby = msg.lobby.players.some(p => p.playerId === myId);
+        if (!amInLobby) {
+          // Stale state — we're not in this lobby. Ignore.
+          break;
+        }
         this.set({
           lobby: msg.lobby,
-          myPlayerId: msg.yourPlayerId ?? this.state.myPlayerId,
-          profile: this.state.profile ?? (msg.yourPlayerId
-            ? { playerId: msg.yourPlayerId, name: 'COMMANDER' }
+          myPlayerId: myId,
+          profile: this.state.profile ?? (myId
+            ? { playerId: myId, name: 'COMMANDER' }
             : null),
-          phase: msg.lobby.status === 'COUNTDOWN' ? 'STARTING' :
-                 msg.lobby.status === 'IN_MATCH' ? 'IN_MATCH' :
-                 msg.lobby.status === 'CLOSED' ? 'FINISHED' : 'LOBBY',
+          phase: this.phaseFromLobby(msg.lobby),
           countdownEndsAt: msg.lobby.countdownEndsAt ?? null,
           error: null,
         });
         break;
+      }
 
-      case 'LOBBY_STATE':
+      case 'LOBBY_STATE': {
+        // If we have a myPlayerId, verify we're in this lobby.
+        // If we're NOT in the roster but have a lobby, it's stale — clear it.
+        if (this.state.myPlayerId && this.state.lobby?.lobbyId === msg.lobby.lobbyId) {
+          const amInLobby = msg.lobby.players.some(p => p.playerId === this.state.myPlayerId);
+          if (!amInLobby) {
+            // We were removed from the lobby (kicked or lobby closed)
+            this.set({
+              lobby: null,
+              phase: 'SEARCHING',
+              latestSnapshot: null,
+              results: null,
+              countdownEndsAt: null,
+            });
+            break;
+          }
+        }
         this.set({
           lobby: msg.lobby,
-          phase: msg.lobby.status === 'COUNTDOWN' ? 'STARTING' :
-                 msg.lobby.status === 'IN_MATCH' ? 'IN_MATCH' :
-                 msg.lobby.status === 'CLOSED' ? 'FINISHED' : 'LOBBY',
+          phase: this.phaseFromLobby(msg.lobby),
           countdownEndsAt: msg.lobby.countdownEndsAt ?? null,
           error: null,
         });
         break;
+      }
 
       case 'LOBBY_ERROR':
         this.set({ error: { code: msg.code, message: msg.message } });
-        // Auto-clear error after 5 seconds
-        setTimeout(() => {
-          if (this.state.error?.message === msg.message) {
-            this.set({ error: null });
-          }
-        }, 5000);
+        this.queueErrorClear(msg.message, 5000);
         break;
 
       case 'LOBBY_LEFT':
@@ -199,6 +272,7 @@ class MPStore {
           countdownEndsAt: null,
           info: msg.reason,
         });
+        this.queueInfoClear(msg.reason, 4000);
         break;
 
       case 'QUICK_MATCH_SEARCHING':
@@ -234,9 +308,7 @@ class MPStore {
           quickMatch: null,
           info: 'MATCH FOUND',
         });
-        setTimeout(() => {
-          if (this.state.info === 'MATCH FOUND') this.set({ info: null });
-        }, 3000);
+        this.queueInfoClear('MATCH FOUND', 3000);
         break;
 
       case 'QUICK_MATCH_CANCELLED':
@@ -256,6 +328,7 @@ class MPStore {
           countdownEndsAt: null,
           info: `COUNTDOWN CANCELLED — ${msg.reason}`,
         });
+        this.queueInfoClear(`COUNTDOWN CANCELLED — ${msg.reason}`, 4000);
         break;
 
       case 'MATCH_STARTING':
@@ -266,7 +339,6 @@ class MPStore {
         break;
 
       case 'MATCH_STARTED':
-        this.snapshotBuffer = [msg.initialState];
         this.set({
           phase: 'IN_MATCH',
           latestSnapshot: msg.initialState,
@@ -275,8 +347,6 @@ class MPStore {
         break;
 
       case 'MATCH_SNAPSHOT':
-        this.snapshotBuffer.push(msg.snapshot);
-        if (this.snapshotBuffer.length > 4) this.snapshotBuffer.shift();
         this.set({ latestSnapshot: msg.snapshot });
         break;
 
@@ -293,6 +363,7 @@ class MPStore {
           results: msg.results ?? null,
           info: msg.reason,
         });
+        this.queueInfoClear(msg.reason, 4000);
         break;
 
       case 'PLAYER_JOINED':
@@ -301,45 +372,45 @@ class MPStore {
       case 'PLAYER_TEAM_CHANGED':
       case 'HOST_CHANGED':
       case 'CONFIG_UPDATED':
-        // Server will follow up with LOBBY_STATE — wait for it
+        // Server follows up with LOBBY_STATE — handled there
         break;
 
       case 'CONNECTION_STATUS':
-        // Already handled via onStatusChange
-        break;
-
-      case 'RECONNECTED':
-        this.set({
-          reconnecting: false,
-          lobby: msg.lobby,
-          latestSnapshot: msg.snapshot ?? null,
-          phase: msg.snapshot ? 'IN_MATCH' :
-                 msg.lobby.status === 'IN_MATCH' ? 'IN_MATCH' : 'LOBBY',
-          info: 'RECONNECTED',
-        });
-        // myPlayerId is preserved across reconnection — the server resumes
-        // the same session via reconnectToken.
-        setTimeout(() => {
-          if (this.state.info === 'RECONNECTED') this.set({ info: null });
-        }, 3000);
         break;
 
       case 'INFO':
         this.set({ info: msg.message });
-        setTimeout(() => {
-          if (this.state.info === msg.message) this.set({ info: null });
-        }, 4000);
+        this.queueInfoClear(msg.message, 4000);
         break;
     }
   }
 
-  // ── Command helpers ──────────────────────────────────────
-
-  sendCommand(command: ClientCommand) {
-    return this.send({ type: 'SEND_COMMAND', command });
+  private phaseFromLobby(lobby: LobbyState): MatchPhase {
+    if (lobby.status === 'COUNTDOWN') return 'STARTING';
+    if (lobby.status === 'IN_MATCH') return 'IN_MATCH';
+    if (lobby.status === 'CLOSED') return 'FINISHED';
+    return 'LOBBY';
   }
 
-  dispose() {
+  private queueInfoClear(text: string, ms: number) {
+    if (this.infoTimeout) clearTimeout(this.infoTimeout);
+    this.infoTimeout = setTimeout(() => {
+      if (this.state.info === text) this.set({ info: null });
+    }, ms);
+  }
+
+  private queueErrorClear(text: string, ms: number) {
+    if (this.errorTimeout) clearTimeout(this.errorTimeout);
+    this.errorTimeout = setTimeout(() => {
+      if (this.state.error?.message === text) this.set({ error: null });
+    }, ms);
+  }
+
+  // ── Lifecycle ───────────────────────────────────────────
+
+  dispose(): void {
+    if (this.infoTimeout) clearTimeout(this.infoTimeout);
+    if (this.errorTimeout) clearTimeout(this.errorTimeout);
     if (this.client) {
       this.client.dispose();
       this.client = null;
@@ -347,20 +418,15 @@ class MPStore {
     this.state = { ...INITIAL_STATE };
     for (const l of this.listeners) l();
   }
-
-  // ── Snapshot buffer for interpolation ────────────────────
-  getSnapshots(): GameStateSnapshot[] {
-    return this.snapshotBuffer;
-  }
 }
 
-// ── Singleton instance (per browser tab) ───────────────────
+// ── Singleton (per browser tab) ─────────────────────────────
 
 let _store: MPStore | null = null;
 
 function getStore(): MPStore {
   if (typeof window === 'undefined') {
-    // SSR — return a stub that does nothing
+    // SSR — return a throwaway store that does nothing
     return new MPStore();
   }
   if (!_store) _store = new MPStore();
@@ -373,13 +439,10 @@ export function useMultiplayer() {
   const store = getStore();
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
 
-  // Auto-connect on first mount
+  // Auto-connect on first mount. The NetClient.connect() is idempotent,
+  // so calling it multiple times (HMR, Strict Mode) is safe.
   useEffect(() => {
     store.connect();
-    return () => {
-      // Don't dispose on unmount — keep connection alive across navigations
-      // (user might navigate between landing and /play)
-    };
   }, [store]);
 
   const send = useCallback((msg: LobbyClientMessage) => store.send(msg), [store]);
@@ -392,9 +455,8 @@ export function useMultiplayer() {
 
 export function connectionQuality(ping: number, status: ConnectionStatus):
   'GOOD' | 'DEGRADED' | 'DISCONNECTED' {
-  if (status === 'DISCONNECTED' && !ping) return 'DISCONNECTED';
-  if (status === 'RECONNECTING') return 'DEGRADED';
-  if (status === 'CONNECTING') return 'DEGRADED';
+  if (status === 'DISCONNECTED') return 'DISCONNECTED';
+  if (status === 'RECONNECTING' || status === 'CONNECTING') return 'DEGRADED';
   if (ping > 300) return 'DEGRADED';
   return 'GOOD';
 }

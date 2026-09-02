@@ -94,7 +94,7 @@ export function Battlefield() {
         g.camera.focusOn(cx, cy, 0.3);
       }
     }
-  }, [snapshot, gameRef.current]);
+  }, [snapshot]);
 
   // ── Capture AAR when match ends ──
   useEffect(() => {

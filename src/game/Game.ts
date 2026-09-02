@@ -422,7 +422,7 @@ export class Game {
       faction: 'FRIEND' as const,
       battalion: { id: p.battalionId, name: p.name, cost: 0, buildTime: p.totalSec ?? 0, composition: '', kinds: [], units: [], desc: '' } as any,
       remaining: p.remainingSec,
-      total: p.remainingSec / (1 - p.progress) || p.remainingSec,
+      total: p.totalSec || p.remainingSec || 1,
     })) as any;
 
     // ── update result ──
