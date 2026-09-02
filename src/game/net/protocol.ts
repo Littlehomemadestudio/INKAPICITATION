@@ -285,8 +285,8 @@ export const NET = {
   INTERP_ALPHA_SMOOTH: 0.18,     // for smoothing remote unit motion
   RECONNECT_BACKOFF_MS: [500, 1000, 2000, 4000, 8000],
   MAX_RECONNECT_ATTEMPTS: 5,
-  PING_INTERVAL_MS: 2000,
-  PING_TIMEOUT_MS: 8000,
+  PING_INTERVAL_MS: 1000,        // measure RTT every 1 second
+  PING_TIMEOUT_MS: 8000,        // connection dead if no pong in 8s
   COUNTDOWN_SEC: 5,
   QUICK_MATCH_TIMEOUT_SEC: 90,
   MAX_PLAYERS_PER_LOBBY: 8,

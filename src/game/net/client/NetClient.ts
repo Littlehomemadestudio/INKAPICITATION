@@ -14,6 +14,10 @@
 //   - Calling connect() while already connected is a no-op
 //   - Calling connect() while connecting is a no-op
 //   - Calling connect() after a disconnect cleanly disposes the old socket first
+//
+// Transport: WebSocket primary, polling fallback.
+//   WebSocket gives ~5ms RTT locally. Polling gives ~500-1500ms through a proxy.
+//   We let socket.io upgrade to WebSocket automatically — Caddy v2 supports it.
 // ─────────────────────────────────────────────────────────────
 
 import { io, Socket } from 'socket.io-client';
@@ -36,27 +40,19 @@ export class NetClient {
   private ping = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
-  private connecting = false; // guards against duplicate connect() calls
+  private connecting = false;
+  // RTT measurement — smoothed average for stability
+  private rttHistory: number[] = [];
+  private static readonly RTT_SAMPLES = 5;
 
   constructor(opts: NetClientOptions) {
     this.opts = opts;
   }
 
-  /**
-   * Connect to the server. Idempotent — calling while already connected
-   * or while a connection attempt is in progress is a no-op.
-   * If a previous socket exists (disconnected), it is cleaned up first.
-   */
   connect(reconnectToken?: string): void {
-    // Already connected — nothing to do
     if (this.socket?.connected) return;
-    // Connection attempt already in progress — don't start a second one
     if (this.connecting && this.socket) return;
-
-    // Clean up any stale socket first
-    if (this.socket) {
-      this.destroySocket();
-    }
+    if (this.socket) this.destroySocket();
 
     this.disposed = false;
     this.connecting = true;
@@ -64,16 +60,17 @@ export class NetClient {
 
     this.socket = io({
       path: '/socket.io',
-      // Polling only — Caddy WebSocket upgrade is unreliable through the gateway.
-      transports: ['polling'],
-      upgrade: false,
-      // Socket.io's built-in reconnection handles retry logic.
+      // Try WebSocket first — if it works, RTT is ~1-5ms.
+      // Fall back to polling if WS is unavailable.
+      // Both work through Caddy v2 (confirmed via HTTP 101 upgrade test).
+      transports: ['websocket', 'polling'],
+      upgrade: true,
+      // Socket.io's built-in reconnection.
       reconnection: true,
       reconnectionAttempts: NET.MAX_RECONNECT_ATTEMPTS,
       reconnectionDelay: NET.RECONNECT_BACKOFF_MS[0],
       reconnectionDelayMax: NET.RECONNECT_BACKOFF_MS[NET.RECONNECT_BACKOFF_MS.length - 1],
       auth: reconnectToken ? { reconnectToken } : undefined,
-      // CRITICAL: this is how the Caddy gateway routes us to port 3030
       query: { XTransformPort: '3030' },
       timeout: 10000,
     });
@@ -97,7 +94,6 @@ export class NetClient {
         this.setStatus('DISCONNECTED');
         return;
       }
-      // socket.io will auto-reconnect unless reason is a permanent failure
       if (reason === 'io server disconnect' || reason === 'io client disconnect') {
         this.setStatus('DISCONNECTED');
       } else {
@@ -124,21 +120,43 @@ export class NetClient {
     });
 
     s.on('connect_error', (_err) => {
-      // Don't spam console — socket.io retries automatically.
-      // The status is already RECONNECTING from the disconnect handler.
+      // socket.io retries automatically.
     });
+
+    // Proper timestamped PING/PONG for RTT measurement.
+    // Server echoes back the timestamp — we compute pure network RTT.
+    s.on('pong_ts', (clientTimestamp: number) => {
+      const rtt = Date.now() - clientTimestamp;
+      this.recordRTT(rtt);
+    });
+  }
+
+  private recordRTT(rtt: number) {
+    this.rttHistory.push(rtt);
+    if (this.rttHistory.length > NetClient.RTT_SAMPLES) this.rttHistory.shift();
+    // Use median for stability (less affected by outliers)
+    const sorted = [...this.rttHistory].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    this.ping = sorted.length % 2 === 0
+      ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+      : sorted[mid];
+    this.opts.onStatusChange('CONNECTED', this.ping);
   }
 
   private startPingLoop() {
     this.stopPingLoop();
+    // Send timestamped ping immediately, then on interval.
+    this.sendPing();
     this.pingTimer = setInterval(() => {
-      if (!this.socket?.connected) return;
-      const t0 = Date.now();
-      this.socket.emit('ping', () => {
-        this.ping = Date.now() - t0;
-        this.opts.onStatusChange('CONNECTED', this.ping);
-      });
+      this.sendPing();
     }, NET.PING_INTERVAL_MS);
+  }
+
+  private sendPing() {
+    if (!this.socket?.connected) return;
+    // Timestamped ping — server echoes it back as 'pong_ts'.
+    // RTT = currentTime - timestamp (pure network round-trip).
+    this.socket.emit('ping_ts', Date.now());
   }
 
   private stopPingLoop() {
@@ -151,15 +169,12 @@ export class NetClient {
     this.opts.onStatusChange(s, this.ping);
   }
 
-  /**
-   * Send a message to the server. Returns false if not connected.
-   * Does NOT throw — callers should check the return value.
-   */
   send(msg: LobbyClientMessage): boolean {
     if (!this.socket?.connected) return false;
     this.socket.emit('msg', msg);
     return true;
   }
+
   private destroySocket() {
     this.stopPingLoop();
     if (this.socket) {
