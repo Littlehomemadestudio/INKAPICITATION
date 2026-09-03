@@ -54,7 +54,6 @@ yarn-error.log*
 
 # ── non-essential project directories ────────
 /examples/
-/mini-services/
 /tests/
 /scripts/
 /.zscripts/
