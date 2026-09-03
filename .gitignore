@@ -1,77 +1,71 @@
-# ─────────────────────────────────────────────
-# PAPER STORM — only ship what runs the game
-# ─────────────────────────────────────────────
-
-# ── dependencies & caches ────────────────────
+```
+# Dependencies
 node_modules/
-.pnp
-.pnp.*
-.yarn/
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-.npm
-.eslintcache
-*.tsbuildinfo
+
+# Build outputs
+dist/
+build/
 .next/
 out/
-build/
-dist/
-.turbo/
-.vercel
-next-env.d.ts
 
-# ── logs & debug output ──────────────────────
-*.log
-dev.log
-server.log
-dev.out.log
-dev.err.log
-tsc.log
-tsc.err
-lint.log
-lint.err
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-*.pid
-
-# ── secrets & local env ──────────────────────
+# Environment variables
 .env
+.env.local
 .env.*
-!.env.example
 
-# ── local data & generated artifacts ─────────
-/db/
-/download/
-/tool-results/
-/public/shots/
-*.db
-*.sqlite
-*.sqlite3
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# ── non-essential project directories ────────
-/examples/
-/tests/
-/scripts/
-/.zscripts/
-/worklog.md
+# Logs
+*.log
 
-# ── tooling & assistant droppings ────────────
-.claude
-.z-ai-config
-/skills/
-prompt
-test
-local-*
-*.pem
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-selfcheck.json
 
-# ── OS / editor noise ────────────────────────
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
+
+# Temporary files
+*.tmp
+*.temp
 .DS_Store
 Thumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-.idea/
-.vscode/
+
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+```

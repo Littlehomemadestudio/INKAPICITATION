@@ -1,71 +1,82 @@
+'use client';
+
 import Link from 'next/link';
 import HeroBattlefield from './HeroBattlefield';
 
 // ─────────────────────────────────────────────────────────────
-// PAPER STORM · hero — the first screen IS the theatre
+// OPERATION PAPERSTORM · Hero — full-screen command interface
+// The landing page IS the battlefield. No navigation chrome,
+// no marketing sections. One screen. One action: PLAY.
 // ─────────────────────────────────────────────────────────────
 
 export default function Hero() {
   return (
-    <section className="relative h-[100svh] min-h-[640px] overflow-hidden">
+    <section className="relative h-[100svh] w-full overflow-hidden">
+      {/* Full-viewport interactive battlefield */}
       <HeroBattlefield />
-      <div className="lp-grain pointer-events-none absolute inset-0 opacity-60" />
+      
+      {/* Subtle paper grain overlay */}
+      <div className="lp-grain pointer-events-none absolute inset-0 opacity-50" />
 
-      {/* frame instrumentation — sparse, meaningful */}
-      <div className="pointer-events-none absolute inset-6 hidden md:block">
-        <div className="absolute left-0 top-0 h-4 w-px bg-[#8b8577]" />
-        <div className="absolute left-0 top-0 h-px w-4 bg-[#8b8577]" />
-        <div className="absolute bottom-0 right-0 h-4 w-px bg-[#8b8577]" />
-        <div className="absolute bottom-0 right-0 h-px w-4 bg-[#8b8577]" />
-        <span className="lp-mono absolute left-5 top-0 text-[9px] tracking-[0.24em] text-[#6b6557]">
-          47°12′N · 33°40′E
-        </span>
-        <span className="lp-mono absolute bottom-0 right-5 text-[9px] tracking-[0.24em] text-[#6b6557]">
-          SHEET 3368-IV · SERIES Z4E · 1:20 000
-        </span>
+      {/* Top-left: Operation designation + status */}
+      <div className="pointer-events-none absolute left-4 top-4 md:left-6 md:top-6">
+        <div className="flex flex-col gap-1.5">
+          <h1 className="lp-mono text-[clamp(18px,2.5vw,28px)] font-bold tracking-[0.28em] text-[#17150f]">
+            OPERATION PAPERSTORM
+          </h1>
+          <div className="flex items-center gap-3">
+            <span className="lp-mono flex items-center gap-2 text-[9px] tracking-[0.2em] text-[#6b6557]">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#17150f] opacity-20"></span>
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-[#17150f]"></span>
+              </span>
+              ONLINE
+            </span>
+            <span className="lp-mono text-[9px] tracking-[0.2em] text-[#6b6557]">·</span>
+            <span className="lp-mono text-[9px] tracking-[0.2em] text-[#6b6557]">REGION: CENTRAL</span>
+          </div>
+        </div>
       </div>
 
-      {/* the composition: the battlefield reads around the title */}
-      <div className="absolute inset-0 flex items-end">
-        <div className="mx-auto w-full max-w-[1440px] px-6 pb-20 md:px-10 md:pb-24">
-          <div className="max-w-[620px]">
-            <p className="lp-kicker mb-5">Operation Crosswind · Task Force Sabre</p>
-            <h1 className="lp-display text-[clamp(64px,10vw,148px)] font-medium leading-[0.92] tracking-[-0.015em] text-[#17150f]">
-              Paper
+      {/* Top-right: Micro info */}
+      <div className="pointer-events-none absolute right-4 top-4 hidden flex-col items-end gap-1 md:flex">
+        <span className="lp-mono text-[9px] tracking-[0.2em] text-[#6b6557]">V 1.0.4</span>
+        <span className="lp-mono text-[9px] tracking-[0.2em] text-[#6b6557]">BUILD 3368</span>
+      </div>
+
+      {/* Bottom-left: Primary command interface */}
+      <div className="absolute bottom-8 left-0 right-0 md:bottom-12">
+        <div className="mx-auto flex max-w-[1440px] flex-col items-start px-6 md:px-10">
+          <div className="max-w-[520px]">
+            <p className="lp-kicker mb-4">COMBINED ARMS REAL-TIME STRATEGY</p>
+            <h2 className="lp-display text-[clamp(48px,8vw,110px)] font-medium leading-[0.92] tracking-[-0.01em] text-[#17150f]">
+              COMMAND
               <br />
-              Storm
-            </h1>
-            <p className="mt-6 max-w-[440px] text-[15px] leading-relaxed text-[#403c33]">
-              Land, air and sea on one sheet of paper. A monochrome
-              combined-arms war where every victory and every loss is paid
-              for in ink — and every battle leaves a mark.
+              THE STORM
+            </h2>
+            <p className="mt-5 max-w-[400px] text-[14px] leading-relaxed text-[#4c473d]">
+              Land, air, and sea forces on a single tactical sheet. 
+              Every unit paid for in ink. Every battle leaves a mark.
             </p>
-            <div className="mt-9 flex flex-wrap items-center gap-4">
+            
+            {/* Primary action: PLAY */}
+            <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link href="/play" className="lp-cta">
-                PLAY NOW
+                PLAY
                 <span aria-hidden className="lp-cta-arrow">→</span>
               </Link>
               <Link href="/play?mode=multiplayer" className="lp-cta-ghost">
                 MULTIPLAYER
-                <span aria-hidden style={{ marginLeft: 6 }}>↗</span>
               </Link>
             </div>
           </div>
         </div>
       </div>
 
-      {/* sector labels — pinned to real map features */}
-      <span className="lp-mono pointer-events-none absolute left-[24%] top-[58%] hidden text-[9px] tracking-[0.3em] text-[#575247] lg:block">
-        NOVY GOROD
+      {/* Bottom-right: Sector labels tied to battlefield features */}
+      <span className="lp-mono pointer-events-none absolute bottom-6 right-6 hidden text-[8px] tracking-[0.28em] text-[#6b6557] lg:block">
+        SECTOR NOVY GOROD · AZURE BAY
       </span>
-      <span className="lp-mono pointer-events-none absolute bottom-[16%] left-[30%] hidden text-[9px] tracking-[0.3em] text-[#e5e3da] lg:block">
-        AZURE BAY
-      </span>
-
-      {/* scroll cue */}
-      <div className="pointer-events-none absolute bottom-6 left-1/2 hidden -translate-x-1/2 md:block">
-        <span className="lp-mono text-[9px] tracking-[0.4em] text-[#6b6557]">DESCEND INTO THE SHEET ▾</span>
-      </div>
     </section>
   );
 }
